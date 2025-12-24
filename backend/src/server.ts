@@ -1,0 +1,1286 @@
+import express, { Request, Response, NextFunction } from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import compression from 'compression';
+import dotenv from 'dotenv';
+import mysql from 'mysql2/promise';
+import mqtt from 'mqtt';
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
+
+dotenv.config();
+
+declare global {
+  namespace Express {
+    interface Request {
+      user: {
+        userId: string;
+        username: string;
+        role: string;
+      };
+    }
+  }
+}
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// Middleware
+app.use(helmet());
+const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173', 'http://localhost:3000'];
+console.log('[Server] Allowed CORS origins:', allowedOrigins);
+app.use(cors({
+  origin: allowedOrigins,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  credentials: true,
+  optionsSuccessStatus: 200
+}));
+app.use(compression());
+app.use(express.json());
+
+// Database Connection Pool
+const pool = mysql.createPool({
+  host: process.env.DB_HOST || 'localhost',
+  port: parseInt(process.env.DB_PORT || '3306'),
+  database: process.env.DB_NAME || 'rfid_system_db',
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '123456',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+});
+
+// In-memory cached dashboard settings with defaults
+let dashboardSettings = {
+  tag_dedupe_window_minutes: 5,
+  device_offline_minutes: 5,
+  auto_refresh_interval_seconds: 30
+};
+
+// MQTT Client - Backend only
+let mqttClient: mqtt.MqttClient | null = null;
+let mqttStatus = 'disconnected';
+let mqttConnecting = false;
+
+// Ensure required tables exist for new features
+async function ensureSchema() {
+  try {
+    // rfid_tags table for storing all tag reads
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS rfid_tags (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        epc VARCHAR(255) NOT NULL,
+        tid VARCHAR(255),
+        rssi INT,
+        antenna INT,
+        reader_id VARCHAR(255),
+        reader_name VARCHAR(255),
+        read_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        raw_payload LONGTEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_read_time (read_time),
+        INDEX idx_reader_name (reader_name),
+        INDEX idx_epc (epc)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+
+    // dashboard_settings table (single row expected)
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS dashboard_settings (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        tag_dedupe_window_minutes INT DEFAULT 5,
+        device_offline_minutes INT DEFAULT 5,
+        auto_refresh_interval_seconds INT DEFAULT 30,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+
+    // tag_read_dedupe table to deduplicate tags per reader within time window
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS tag_read_dedupe (
+        epc VARCHAR(255) NOT NULL,
+        reader_id VARCHAR(255) NOT NULL,
+        last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (epc, reader_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+  } catch (err) {
+    console.error('[DB] ensureSchema error:', err);
+  }
+}
+
+// Load dashboard settings into memory (first row) or write defaults if missing
+async function loadDashboardSettingsFromDB() {
+  try {
+    const [rows]: any = await pool.execute('SELECT * FROM dashboard_settings LIMIT 1');
+    if (rows && rows.length > 0) {
+      const r = rows[0];
+      dashboardSettings = {
+        tag_dedupe_window_minutes: r.tag_dedupe_window_minutes || dashboardSettings.tag_dedupe_window_minutes,
+        device_offline_minutes: r.device_offline_minutes || dashboardSettings.device_offline_minutes,
+        auto_refresh_interval_seconds: r.auto_refresh_interval_seconds || dashboardSettings.auto_refresh_interval_seconds
+      };
+    } else {
+      await pool.execute(
+        'INSERT INTO dashboard_settings (tag_dedupe_window_minutes, device_offline_minutes, auto_refresh_interval_seconds) VALUES (?, ?, ?)',
+        [dashboardSettings.tag_dedupe_window_minutes, dashboardSettings.device_offline_minutes, dashboardSettings.auto_refresh_interval_seconds]
+      );
+    }
+    console.log('[Settings] Loaded dashboard settings', dashboardSettings);
+  } catch (err) {
+    console.error('[Settings] loadDashboardSettingsFromDB error:', err);
+  }
+}
+
+// Load MQTT configuration from database
+async function loadMQTTConfigFromDB() {
+  try {
+    const [rows]: any = await pool.execute(
+      'SELECT * FROM mqtt_config WHERE enabled = 1 LIMIT 1'
+    );
+
+    if (!rows || rows.length === 0) return null;
+    const cfg = rows[0];
+    let topics: string[] = [];
+
+    if (Array.isArray(cfg.topics)) {
+      topics = cfg.topics;
+    } else if (typeof cfg.topics === 'string') {
+      topics = JSON.parse(cfg.topics);
+    }
+
+    topics = topics.filter(Boolean);
+    return {
+      broker: cfg.broker,
+      port: cfg.port,
+      protocol: cfg.protocol,
+      username: cfg.username,
+      password: cfg.password,
+      clientId: cfg.client_id,
+      topics,
+      qos: cfg.qos ?? 0,
+      enabled: !!cfg.enabled
+    };
+  } catch (err) {
+    console.error('[MQTT] Failed to load config from DB:', err);
+    return null;
+  }
+}
+
+function buildBrokerUrl(cfg: any) {
+  if (!cfg) return null;
+  const host = cfg.broker;
+  const port = cfg.port ? `:${cfg.port}` : '';
+  const protocol = cfg.protocol || 'mqtt';
+  
+  if (protocol === 'ws' || protocol === 'wss') {
+    return `${protocol}://${host}${port}`;
+  }
+  if (protocol === 'mqtts') return `mqtts://${host}${port}`;
+  return `mqtt://${host}${port}`;
+}
+
+async function connectMQTTWithConfig(cfg: any) {
+  try {
+    if (!cfg || !cfg.enabled) { 
+      console.log('[MQTT] Config not provided or disabled'); 
+      return; 
+    }
+    if (mqttConnecting) { 
+      console.log('[MQTT] Connection already in progress'); 
+      return; 
+    }
+    mqttConnecting = true;
+
+    await disconnectMQTT();
+
+    const url = buildBrokerUrl(cfg);
+    if (!url) { 
+      mqttConnecting = false; 
+      return; 
+    }
+
+    console.log('[MQTT] Backend connecting with:', {
+      url,
+      clientId: cfg.clientId,
+      username: cfg.username,
+      hasPassword: !!cfg.password,
+      protocol: cfg.protocol,
+      topics: cfg.topics
+    });
+
+    const connectOptions: any = {
+      clientId: cfg.clientId || `rfid-backend-${Date.now()}`,
+      clean: true,
+      reconnectPeriod: 5000,
+      connectTimeout: 30_000,
+      keepalive: 60
+    };
+
+    if (cfg.username) {
+      connectOptions.username = cfg.username;
+    }
+    if (cfg.password) {
+      connectOptions.password = cfg.password;
+    }
+
+    mqttClient = mqtt.connect(url, connectOptions);
+
+    mqttClient.on('connect', () => {
+      mqttStatus = 'connected';
+      mqttConnecting = false;
+      console.log('[MQTT] ✅ Backend connected to broker', url);
+      
+      const topics: string[] = cfg.topics || [];
+      if (topics.length > 0) {
+        mqttClient?.subscribe(topics, { qos: cfg.qos || 0 }, (err, granted) => {
+          if (err) {
+            console.error('[MQTT] ❌ Subscribe error:', err);
+          } else if (granted) {
+            console.log('[MQTT] ✅ Subscribed to topics:', granted.map((g: any) => g.topic).join(', '));
+          }
+        });
+      }
+    });
+
+    mqttClient.on('close', () => {
+      mqttStatus = 'disconnected';
+      console.log('[MQTT] Connection closed');
+    });
+
+    mqttClient.on('reconnect', () => {
+      mqttStatus = 'reconnecting';
+      console.log('[MQTT] Reconnecting...');
+    });
+
+    mqttClient.on('error', (err: any) => {
+      mqttStatus = 'error';
+      mqttConnecting = false;
+      
+      console.error('[MQTT] ❌ Backend client error:', {
+        message: err.message,
+        code: err.code
+      });
+
+      if (err.code === 5) {
+        console.error('[MQTT] 🔐 Authentication Error - Check credentials in database');
+      } else if (err.code === 4) {
+        console.error('[MQTT] ⚠️  Bad username or password');
+      }
+    });
+
+    mqttClient.on('message', async (topic, payload) => {
+      const message = safeParseJSON(payload);
+      if (!message) return;
+
+      switch (message.code) {
+        case 0:
+          await handleTagMessage(message.data);
+          break;
+        case 30:
+          await handleHeartbeat(message.data);
+          break;
+        default:
+          console.log('[MQTT] Ignored code:', message.code);
+      }
+    });
+
+    function safeParseJSON(payload: Buffer) {
+      try {
+        return JSON.parse(payload.toString());
+      } catch {
+        return null;
+      }
+    }
+
+  } catch (err) {
+    mqttConnecting = false;
+    console.error('[MQTT] ❌ connectMQTTWithConfig failed:', err);
+  }
+}
+
+async function disconnectMQTT() {
+  try {
+    if (mqttClient) {
+      console.log('[MQTT] Disconnecting backend client');
+      mqttClient.removeAllListeners();
+      mqttClient.end(true);
+      mqttClient = null;
+      mqttStatus = 'disconnected';
+    }
+  } catch (err) {
+    console.error('[MQTT] Disconnect error:', err);
+  }
+}
+
+async function reconnectMQTT(cfg: any) {
+  await disconnectMQTT();
+  await connectMQTTWithConfig(cfg);
+}
+
+function normalizeRFIDPayload(data: any) {
+  return {
+    epc: data.EPC ?? null,
+    tid: data.TID ?? null,
+    rssi: data.RSSI ?? null,
+    antenna: data.AntId ?? null,
+    reader_id: data.Device ?? null,
+    reader_name: data.Device ?? null,
+    read_time: data.ReadTime
+      ? new Date(data.ReadTime.replace(' ', 'T'))
+      : new Date(),
+    raw_payload: JSON.stringify(data)
+  };
+}
+
+function extractDeviceFromPayload(data: any) {
+  const now = new Date();
+  return {
+    id: data.Device ?? null,
+    name: data.Device ?? null,
+    type: 'reader',
+    status: 'online',
+    ip_address: data.IP ?? null,
+    mac_address: data.MAC ?? null,
+    signal_strength: typeof data.RSSI === 'number' ? data.RSSI : 100,
+    last_heartbeat: now,
+    discovered_by: 'mqtt',
+    first_seen: now,
+    tags_read_increment: 1
+  };
+}
+
+async function upsertReaderDevice(device: any) {
+  try {
+    if (!device || !device.id) return;
+    const sql = `
+      INSERT INTO devices
+        (id, name, type, status, ip_address, mac_address, signal_strength, last_heartbeat, tags_read_today, discovery_source, last_seen, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        status = 'online',
+        last_seen = NOW(),
+        discovery_source = 'auto',
+        signal_strength = VALUES(signal_strength),
+        last_heartbeat = VALUES(last_heartbeat),
+        ip_address = COALESCE(VALUES(ip_address), ip_address),
+        mac_address = COALESCE(VALUES(mac_address), mac_address),
+        tags_read_today = tags_read_today + VALUES(tags_read_today)
+    `;
+    const params = [
+      device.id, device.name, device.type, device.status, device.ip_address, device.mac_address,
+      device.signal_strength, device.last_heartbeat, device.tags_read_increment || 1, device.discovered_by || 'mqtt', new Date(), new Date()
+    ];
+    await pool.execute(sql, params);
+  } catch (err) {
+    console.error('[Device] upsertReaderDevice error:', err);
+  }
+}
+
+async function saveTagData(tag: any) {
+  const sql = `
+    INSERT INTO rfid_tags
+    (epc, tid, rssi, antenna, reader_id, reader_name, read_time, raw_payload)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `;
+
+  const values = [
+    tag.epc,
+    tag.tid,
+    tag.rssi,
+    tag.antenna,
+    tag.reader_id,
+    tag.reader_name,
+    tag.read_time,
+    tag.raw_payload
+  ];
+
+  await pool.execute(sql, values);
+}
+
+// Auth Middleware
+function authenticateToken(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access token required' });
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key', (err: any, user: any) => {
+    if (err) {
+      return res.status(403).json({ error: 'Invalid or expired token' });
+    }
+    req.user = user;
+    next();
+  });
+}
+
+// ============= ROUTES =============
+
+// Health Check
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'healthy', read_time: new Date().toISOString() });
+});
+
+// MQTT Status Route
+app.get('/api/settings/mqtt/status', authenticateToken, (req, res) => {
+  res.json({ success: true, data: { status: mqttStatus } });
+});
+
+// Get MQTT Configuration (for frontend to display in UI)
+app.get('/api/settings/mqtt', authenticateToken, async (req, res) => {
+  try {
+    const [rows]: any = await pool.execute(
+      'SELECT * FROM mqtt_config WHERE enabled = 1 LIMIT 1'
+    );
+    
+    if (!rows || rows.length === 0) {
+      return res.json({ 
+        success: true, 
+        data: null,
+        message: 'No MQTT configuration found. Please configure in Settings.'
+      });
+    }
+
+    const cfg = rows[0];
+    let topics: string[] = [];
+
+    if (Array.isArray(cfg.topics)) {
+      topics = cfg.topics;
+    } else if (typeof cfg.topics === 'string') {
+      try {
+        topics = JSON.parse(cfg.topics);
+      } catch (e) {
+        console.error('[MQTT] Failed to parse topics JSON:', e);
+        topics = [];
+      }
+    }
+
+    topics = topics.filter(Boolean);
+
+    // Don't send password to frontend for security
+    const safeCfg = {
+      broker: cfg.broker,
+      port: cfg.port,
+      protocol: cfg.protocol || 'mqtt',
+      username: cfg.username || '',
+      clientId: cfg.client_id || '',
+      topics: topics,
+      qos: cfg.qos ?? 0,
+      enabled: !!cfg.enabled,
+      hasPassword: !!cfg.password
+    };
+
+    console.log('[MQTT] Fetched config from DB:', {
+      ...safeCfg,
+      hasPassword: !!cfg.password
+    });
+
+    res.json({ success: true, data: safeCfg });
+  } catch (error) {
+    console.error('[Settings] Get MQTT config error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch MQTT config' });
+  }
+});
+
+// Debug endpoint to see what's actually in database (Admin only)
+app.get('/api/settings/mqtt/debug', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const [allRows]: any = await pool.execute('SELECT * FROM mqtt_config');
+    
+    const debugData = allRows.map((row: any) => ({
+      id: row.id,
+      broker: row.broker,
+      port: row.port,
+      protocol: row.protocol,
+      username: row.username,
+      hasPassword: !!row.password,
+      passwordLength: row.password ? row.password.length : 0,
+      client_id: row.client_id,
+      topics: row.topics,
+      qos: row.qos,
+      enabled: row.enabled,
+      created_at: row.created_at,
+      updated_at: row.updated_at
+    }));
+
+    res.json({ 
+      success: true, 
+      data: {
+        totalConfigs: allRows.length,
+        configs: debugData
+      }
+    });
+  } catch (error) {
+    console.error('[Settings] Debug MQTT config error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch debug data' });
+  }
+});
+
+// Save MQTT Configuration from UI
+app.post('/api/settings/mqtt', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const {
+      broker,
+      port,
+      protocol,
+      username,
+      password,
+      client_id,
+      topics,
+      qos,
+      enabled
+    } = req.body;
+
+    // Validate required fields
+    if (!broker || !port) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Broker and port are required' 
+      });
+    }
+
+    const topicsJson = JSON.stringify(topics || []);
+    const clientIdValue = client_id ?? req.body.clientId ?? `rfid-backend-${Date.now()}`;
+
+    console.log('[MQTT] Saving configuration from UI:', {
+      broker,
+      port,
+      protocol,
+      username,
+      hasPassword: !!password,
+      clientId: clientIdValue,
+      topics,
+      qos,
+      enabled
+    });
+
+    // First, disable all existing configs
+    await pool.execute('UPDATE mqtt_config SET enabled = 0');
+
+    // Check if any config exists
+    const [existingRows]: any = await pool.execute(
+      'SELECT id FROM mqtt_config LIMIT 1'
+    );
+
+    if (existingRows.length > 0) {
+      // Update existing config
+      const updateSql = `
+        UPDATE mqtt_config
+        SET broker=?, port=?, protocol=?, username=?, password=?,
+            client_id=?, topics=?, qos=?, enabled=?, updated_at=NOW()
+        WHERE id=?
+      `;
+      await pool.execute(updateSql, [
+        broker, 
+        port, 
+        protocol || 'mqtt', 
+        username || null, 
+        password || null, 
+        clientIdValue, 
+        topicsJson, 
+        qos || 0, 
+        enabled ? 1 : 0, 
+        existingRows[0].id
+      ]);
+      console.log('[MQTT] ✅ Updated existing config in database (ID:', existingRows[0].id, ')');
+    } else {
+      // Insert new config
+      const insertSql = `
+        INSERT INTO mqtt_config
+        (broker, port, protocol, username, password, client_id, topics, qos, enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `;
+      await pool.execute(insertSql, [
+        broker, 
+        port, 
+        protocol || 'mqtt', 
+        username || null, 
+        password || null, 
+        clientIdValue, 
+        topicsJson, 
+        qos || 0, 
+        enabled ? 1 : 0
+      ]);
+      console.log('[MQTT] ✅ Inserted new config into database');
+    }
+
+    // Verify the save by reading back
+    const [verifyRows]: any = await pool.execute(
+      'SELECT * FROM mqtt_config WHERE enabled = 1 LIMIT 1'
+    );
+    
+    if (verifyRows && verifyRows.length > 0) {
+      console.log('[MQTT] ✅ Verified saved config:', {
+        broker: verifyRows[0].broker,
+        port: verifyRows[0].port,
+        username: verifyRows[0].username,
+        hasPassword: !!verifyRows[0].password,
+        enabled: verifyRows[0].enabled
+      });
+    } else {
+      console.error('[MQTT] ❌ Failed to verify saved config!');
+    }
+
+    // Reconnect backend MQTT with new config
+    if (enabled) {
+      const newCfg = await loadMQTTConfigFromDB();
+      if (newCfg) {
+        console.log('[MQTT] Reconnecting backend with credentials:', {
+          broker: newCfg.broker,
+          port: newCfg.port,
+          username: newCfg.username,
+          hasPassword: !!newCfg.password
+        });
+        await reconnectMQTT(newCfg);
+        console.log('[MQTT] ✅ Backend reconnected with new configuration');
+      } else {
+        console.error('[MQTT] ❌ Failed to load config after save!');
+      }
+    } else {
+      await disconnectMQTT();
+      console.log('[MQTT] ⚠️  MQTT disabled, backend disconnected');
+    }
+
+    // Return saved config to frontend (without password)
+    res.json({ 
+      success: true, 
+      message: 'MQTT configuration saved successfully',
+      data: { 
+        broker,
+        port,
+        protocol: protocol || 'mqtt',
+        username,
+        clientId: clientIdValue,
+        topics,
+        qos: qos || 0,
+        enabled: !!enabled,
+        hasPassword: !!password
+      }
+    });
+  } catch (error: any) {
+    console.error('[Settings] Save MQTT config error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to save MQTT config',
+      details: error.message 
+    });
+  }
+});
+
+// Test MQTT Connection (before saving)
+app.post('/api/settings/mqtt/test', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const { broker, port, protocol, username, password, client_id } = req.body;
+
+    console.log('[MQTT Test] Testing connection:', {
+      broker,
+      port,
+      protocol,
+      username,
+      hasPassword: !!password,
+      clientId: client_id
+    });
+
+    const host = broker;
+    const portStr = port ? `:${port}` : '';
+    const proto = protocol || 'mqtt';
+    
+    let url: string;
+    if (proto === 'ws' || proto === 'wss') {
+      url = `${proto}://${host}${portStr}`;
+    } else if (proto === 'mqtts') {
+      url = `mqtts://${host}${portStr}`;
+    } else {
+      url = `mqtt://${host}${portStr}`;
+    }
+
+    const testClient = mqtt.connect(url, {
+      clientId: client_id || `test-${Date.now()}`,
+      username: username || undefined,
+      password: password || undefined,
+      clean: true,
+      connectTimeout: 10_000,
+      reconnectPeriod: 0
+    });
+
+    let responded = false;
+
+    testClient.on('connect', () => {
+      if (responded) return;
+      responded = true;
+      
+      console.log('[MQTT Test] ✅ Connection successful');
+      testClient.end();
+      res.json({ 
+        success: true, 
+        message: 'Connection successful',
+        data: { status: 'connected' }
+      });
+    });
+
+    testClient.on('error', (err: any) => {
+      if (responded) return;
+      responded = true;
+      
+      console.error('[MQTT Test] ❌ Connection failed:', err.message);
+      testClient.end();
+      
+      let errorMessage = 'Connection failed';
+      let suggestions: string[] = [];
+
+      if (err.code === 5 || err.message.includes('Not authorized')) {
+        errorMessage = 'Authentication failed - Not authorized';
+        suggestions = [
+          'Verify username and password are correct in EMQX',
+          'Check if user exists in EMQX Dashboard > Authentication',
+          'Verify user has permission to connect',
+          'Check EMQX ACL/permissions for this user'
+        ];
+      } else if (err.code === 4) {
+        errorMessage = 'Bad username or password';
+        suggestions = [
+          'Double-check username and password',
+          'Verify credentials in EMQX Dashboard'
+        ];
+      } else if (err.code === 'ECONNREFUSED') {
+        errorMessage = 'Connection refused - Broker not reachable';
+        suggestions = [
+          'Verify EMQX is running',
+          'Check broker address and port',
+          'Verify firewall settings'
+        ];
+      }
+
+      res.status(400).json({ 
+        success: false, 
+        error: errorMessage,
+        details: err.message,
+        suggestions
+      });
+    });
+
+    setTimeout(() => {
+      if (!responded) {
+        responded = true;
+        testClient.end();
+        res.status(408).json({ 
+          success: false, 
+          error: 'Connection timeout',
+          suggestions: [
+            'Broker may be unreachable',
+            'Check network connectivity'
+          ]
+        });
+      }
+    }, 12_000);
+
+  } catch (error: any) {
+    console.error('[MQTT Test] Error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Test failed',
+      details: error.message 
+    });
+  }
+});
+
+// Dashboard Settings endpoints
+app.get('/api/settings/dashboard', authenticateToken, async (req, res) => {
+  try {
+    res.json({ success: true, data: dashboardSettings });
+  } catch (err) {
+    console.error('[Settings] GET error:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch settings' });
+  }
+});
+
+app.put('/api/settings/dashboard', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') return res.status(403).json({ success: false, error: 'Admin required' });
+
+    const { tag_dedupe_window_minutes, device_offline_minutes, auto_refresh_interval_seconds } = req.body;
+
+    const [rows]: any = await pool.execute('SELECT id FROM dashboard_settings LIMIT 1');
+    if (rows && rows.length > 0) {
+      await pool.execute(
+        `UPDATE dashboard_settings SET tag_dedupe_window_minutes = ?, device_offline_minutes = ?, auto_refresh_interval_seconds = ?, updated_at = NOW() WHERE id = ?`,
+        [tag_dedupe_window_minutes, device_offline_minutes, auto_refresh_interval_seconds, rows[0].id]
+      );
+    } else {
+      await pool.execute(
+        `INSERT INTO dashboard_settings (tag_dedupe_window_minutes, device_offline_minutes, auto_refresh_interval_seconds) VALUES (?, ?, ?)`,
+        [tag_dedupe_window_minutes, device_offline_minutes, auto_refresh_interval_seconds]
+      );
+    }
+
+    await loadDashboardSettingsFromDB();
+    res.json({ success: true, data: dashboardSettings });
+  } catch (err) {
+    console.error('[Settings] PUT error:', err);
+    res.status(500).json({ success: false, error: 'Failed to update settings' });
+  }
+});
+
+// Authentication
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    
+    const [users]: any = await pool.execute(
+      'SELECT * FROM users WHERE username = ?',
+      [username]
+    );
+
+    if (users.length === 0) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    }
+
+    const user = users[0];
+    const validPassword = await bcrypt.compare(password, user.password_hash);
+
+    if (!validPassword) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign(
+      { userId: user.id, username: user.username, role: user.role },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '24h' }
+    );
+
+    await pool.execute(
+      'UPDATE users SET last_login = NOW() WHERE id = ?',
+      [user.id]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        user: {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          role: user.role
+        },
+        token
+      }
+    });
+  } catch (error) {
+    console.error('[Auth] Login error:', error);
+    res.status(500).json({ success: false, error: 'Login failed' });
+  }
+});
+
+// Get Tags
+app.get('/api/tags', authenticateToken, async (req, res) => {
+  try {
+    const { page = 1, limit = 100, startDate, endDate, readerId } = req.query;
+    
+    let query = 'SELECT * FROM rfid_tags WHERE 1=1';
+    const params: any[] = [];
+
+    if (startDate) {
+      query += ' AND read_time >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      query += ' AND read_time <= ?';
+      params.push(endDate);
+    }
+    if (readerId) {
+      query += ' AND reader_id = ?';
+      params.push(readerId);
+    }
+
+    const pageNum = parseInt(page as string) || 1;
+    const limitNum = parseInt(limit as string) || 100;
+    const offset = (pageNum - 1) * limitNum;
+
+    query += ` ORDER BY read_time DESC LIMIT ${limitNum} OFFSET ${offset}`;
+    const [tags] = await pool.execute(query, params);
+    const [[{ total }]] = await pool.execute('SELECT COUNT(*) as total FROM rfid_tags') as any;
+
+    res.json({
+      success: true,
+      data: {
+        tags,
+        total,
+        page: parseInt(page as string),
+        totalPages: Math.ceil(total / parseInt(limit as string))
+      }
+    });
+  } catch (error) {
+    console.error('[Tags] Error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch tags' });
+  }
+});
+
+// Get Dashboard Stats
+app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
+  try {
+    const [[tagsToday]] = await pool.execute(
+      'SELECT COUNT(*) as count FROM rfid_tags WHERE DATE(read_time) = CURDATE()'
+    ) as any;
+
+    const [[activeReaders]] = await pool.execute(
+      'SELECT COUNT(*) as count FROM devices WHERE status = "online"'
+    ) as any;
+
+    const [[uniqueTags]] = await pool.execute(
+      'SELECT COUNT(DISTINCT epc) as count FROM rfid_tags'
+    ) as any;
+
+    const [[offlineDevices]] = await pool.execute(
+      'SELECT COUNT(*) as count FROM devices WHERE status = "offline"'
+    ) as any;
+
+    res.json({
+      success: true,
+      data: {
+        totalTagsToday: tagsToday.count,
+        activeReaders: activeReaders.count,
+        uniqueTags: uniqueTags.count,
+        errorCount: offlineDevices.count
+      }
+    });
+  } catch (error) {
+    console.error('[Dashboard] Error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch stats' });
+  }
+});
+
+// Get Activity Data (24 hours)
+app.get('/api/dashboard/activity', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(`
+      SELECT 
+        DATE_FORMAT(read_time, '%H:00') as time,
+        COUNT(*) as count
+      FROM rfid_tags
+      WHERE read_time >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+      GROUP BY DATE_FORMAT(read_time, '%H:00')
+      ORDER BY time
+    `);
+
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('[Dashboard] Activity error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch activity' });
+  }
+});
+
+// Get Tags by Device
+app.get('/api/dashboard/tags-by-device', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(`
+      SELECT 
+        reader_name as device,
+        COUNT(*) as count
+      FROM rfid_tags
+      WHERE DATE(read_time) = CURDATE()
+      GROUP BY reader_name
+      ORDER BY count DESC
+      LIMIT 10
+    `);
+
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('[Dashboard] Tags by device error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch data' });
+  }
+});
+
+// Get Devices
+app.get('/api/devices', authenticateToken, async (req, res) => {
+  try {
+    const [rows]: any = await pool.execute('SELECT * FROM devices ORDER BY name');
+
+    const devices = (rows || []).map((r: any) => ({
+      id: r.id,
+      name: r.name,
+      type: r.type,
+      status: r.status,
+      ipAddress: r.ip_address || null,
+      macAddress: r.mac_address || null,
+      location: r.location || null,
+      zone: r.zone || null,
+      signalStrength: typeof r.signal_strength === 'number' ? r.signal_strength : (r.signal_strength ? Number(r.signal_strength) : 0),
+      lastHeartbeat: r.last_heartbeat ? new Date(r.last_heartbeat).toISOString() : null,
+      lastSeen: r.last_seen ? new Date(r.last_seen).toISOString() : null,
+      discoverySource: r.discovery_source || 'manual',
+      coordinates: (r.coordinates_x !== null && r.coordinates_y !== null) ? { x: Number(r.coordinates_x), y: Number(r.coordinates_y) } : undefined,
+      tagsReadToday: typeof r.tags_read_today === 'number' ? r.tags_read_today : (r.tags_read_today ? Number(r.tags_read_today) : 0),
+      uptime: r.uptime || null,
+      createdAt: r.created_at ? new Date(r.created_at).toISOString() : null
+    }));
+
+    res.json({ success: true, data: devices });
+  } catch (error) {
+    console.error('[Devices] Error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch devices' });
+  }
+});
+
+// Create Device
+app.post('/api/devices', authenticateToken, async (req, res) => {
+  try {
+    const device = req.body;
+    const id = `device-${Date.now()}`;
+
+    await pool.execute(
+      `INSERT INTO devices (id, name, type, status, ip_address, mac_address, location, zone, signal_strength, uptime)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, device.name, device.type, device.status, device.ipAddress, device.macAddress, 
+       device.location, device.zone, device.signalStrength, device.uptime]
+    );
+
+    res.json({ success: true, data: { id, ...device } });
+  } catch (error) {
+    console.error('[Devices] Create error:', error);
+    res.status(500).json({ success: false, error: 'Failed to create device' });
+  }
+});
+
+// Update Device
+app.put('/api/devices/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const device = req.body;
+
+    await pool.execute(
+      `UPDATE devices SET name=?, status=?, ip_address=?, mac_address=?, location=?, zone=?, signal_strength=?
+       WHERE id=?`,
+      [device.name, device.status, device.ipAddress, device.macAddress, device.location, 
+       device.zone, device.signalStrength, id]
+    );
+
+    res.json({ success: true, data: device });
+  } catch (error) {
+    console.error('[Devices] Update error:', error);
+    res.status(500).json({ success: false, error: 'Failed to update device' });
+  }
+});
+
+// Delete Device
+app.delete('/api/devices/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.execute('DELETE FROM devices WHERE id = ?', [id]);
+    res.json({ success: true, message: 'Device deleted' });
+  } catch (error) {
+    console.error('[Devices] Delete error:', error);
+    res.status(500).json({ success: false, error: 'Failed to delete device' });
+  }
+});
+
+// Get Users (Admin only)
+app.get('/api/users', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const [users] = await pool.execute(
+      'SELECT id, username, email, role, created_at, last_login FROM users'
+    );
+
+    res.json({ success: true, data: users });
+  } catch (error) {
+    console.error('[Users] Error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch users' });
+  }
+});
+
+// Create User (Admin only)
+app.post('/api/users', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const { username, email, password, role } = req.body;
+    const id = `user-${Date.now()}`;
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    await pool.execute(
+      'INSERT INTO users (id, username, email, password_hash, role) VALUES (?, ?, ?, ?, ?)',
+      [id, username, email, passwordHash, role]
+    );
+
+    res.json({
+      success: true,
+      data: { id, username, email, role }
+    });
+  } catch (error) {
+    console.error('[Users] Create error:', error);
+    res.status(500).json({ success: false, error: 'Failed to create user' });
+  }
+});
+
+// Delete User (Admin only)
+app.delete('/api/users/:id', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const { id } = req.params;
+    await pool.execute('DELETE FROM users WHERE id = ?', [id]);
+    res.json({ success: true, message: 'User deleted' });
+  } catch (error) {
+    console.error('[Users] Delete error:', error);
+    res.status(500).json({ success: false, error: 'Failed to delete user' });
+  }
+});
+
+async function handleTagMessage(data: any) {
+  try {
+    const tag = normalizeRFIDPayload(data);
+
+    if (!tag || !tag.epc) return;
+
+    const readerId = tag.reader_id || 'unknown';
+    const dedupeMinutes = dashboardSettings.tag_dedupe_window_minutes || 5;
+
+    let shouldIncrement = true;
+    try {
+      const [rows]: any = await pool.execute(
+        'SELECT last_seen_at FROM tag_read_dedupe WHERE epc = ? AND reader_id = ? LIMIT 1',
+        [tag.epc, readerId]
+      );
+
+      if (rows && rows.length > 0) {
+        const lastSeen = new Date(rows[0].last_seen_at).getTime();
+        const now = Date.now();
+        if (now - lastSeen < dedupeMinutes * 60 * 1000) {
+          shouldIncrement = false;
+        }
+      }
+    } catch (err) {
+      console.error('[MQTT] dedupe lookup error:', err);
+    }
+
+    try {
+      await pool.execute(
+        `INSERT INTO tag_read_dedupe (epc, reader_id, last_seen_at) VALUES (?, ?, NOW())
+         ON DUPLICATE KEY UPDATE last_seen_at = NOW()`,
+        [tag.epc, readerId]
+      );
+    } catch (err) {
+      console.error('[MQTT] dedupe upsert error:', err);
+    }
+
+    const deviceInfo = extractDeviceFromPayload(data);
+    deviceInfo.tags_read_increment = shouldIncrement ? 1 : 0;
+    await upsertReaderDevice(deviceInfo);
+
+    await saveTagData(tag);
+
+    console.log('[MQTT] Tag processed, epc=', tag.epc, 'incremented=', shouldIncrement);
+  } catch (err) {
+    console.error('[MQTT] handleTagMessage error:', err);
+  }
+}
+
+async function handleHeartbeat(data: any) {
+  try {
+    const deviceInfo = extractDeviceFromPayload(data);
+    await upsertReaderDevice(deviceInfo);
+    console.log('[MQTT] Heartbeat processed for', deviceInfo.id);
+  } catch (err) {
+    console.error('[MQTT] handleHeartbeat error:', err);
+  }
+}
+
+// Error Handler
+app.use((err: any, req: any, res: any, next: any) => {
+  console.error('[Server] Error:', err);
+  res.status(500).json({ success: false, error: 'Internal server error' });
+});
+
+// Start Server
+app.listen(PORT, () => {
+  console.log(`[Server] Running on port ${PORT}`);
+  console.log(`[Server] Environment: ${process.env.NODE_ENV || 'development'}`);
+
+  // Initialize without auto-connecting MQTT
+  (async () => {
+    try {
+      await ensureSchema();
+      await loadDashboardSettingsFromDB();
+      scheduleDailyReset();
+      scheduleDeviceOfflineUpdater();
+
+      // Check if MQTT config exists and is enabled
+      const cfg = await loadMQTTConfigFromDB();
+      if (cfg && cfg.enabled) {
+        console.log('[MQTT] Found enabled configuration in database');
+        await connectMQTTWithConfig(cfg);
+      } else {
+        console.log('[MQTT] ⚠️  No MQTT configuration found or disabled');
+        console.log('[MQTT] 📝 Please configure MQTT broker in Settings page');
+      }
+    } catch (err) {
+      console.error('[Server] Startup init failed:', err);
+    }
+  })();
+});
+
+function scheduleDailyReset() {
+  const resetFn = async () => {
+    try {
+      await pool.execute('UPDATE devices SET tags_read_today = 0');
+      console.log('[Maintenance] Reset tags_read_today to 0');
+    } catch (err) {
+      console.error('[Maintenance] Failed to reset tags_read_today:', err);
+    }
+  };
+
+  const now = new Date();
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  const msUntilNext = next.getTime() - now.getTime();
+
+  setTimeout(() => {
+    resetFn();
+    setInterval(resetFn, 24 * 60 * 60 * 1000);
+  }, msUntilNext);
+}
+
+function scheduleDeviceOfflineUpdater() {
+  const checkFn = async () => {
+    try {
+      const mins = dashboardSettings.device_offline_minutes || 5;
+      await pool.execute(`
+        UPDATE devices
+        SET status = 'offline'
+        WHERE last_seen < DATE_SUB(NOW(), INTERVAL ? MINUTE)
+      `, [mins]);
+    } catch (err) {
+      console.error('[Maintenance] Device offline updater failed:', err);
+    }
+  };
+  setInterval(checkFn, 30_000);
+}
+
+process.on('SIGTERM', () => {
+  console.log('[Server] SIGTERM received, closing gracefully');
+  mqttClient?.end();
+  pool.end();
+  process.exit(0);
+});

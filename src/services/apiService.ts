@@ -1,0 +1,337 @@
+/// <reference types="vite/client" />
+
+// API Service Layer for backend communication
+// Ready for production deployment with environment configuration
+
+import { RFIDTag, Device, User, DashboardStats } from '../types';
+
+// API Configuration
+const API_CONFIG = {
+  baseURL: import.meta.env.VITE_API_URL ||
+  "http://localhost:3001/api",
+  timeout: 30000,
+  retryAttempts: 3,
+};
+
+interface APIResponse<T = any> {
+  success: boolean;
+  data?: T;
+  message?: string;
+  error?: string;
+}
+
+class APIService {
+  private baseURL: string;
+  private timeout: number;
+
+  constructor() {
+    this.baseURL = API_CONFIG.baseURL;
+    this.timeout = API_CONFIG.timeout;
+  }
+
+  /**
+   * Generic HTTP request handler
+   */
+  private async request<T>(
+    endpoint: string,
+    options: RequestInit = {}
+  ): Promise<APIResponse<T>> {
+    const token = this.getAuthToken();
+    const url = `${this.baseURL}${endpoint}`;
+
+    const config: RequestInit = {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token && { 'Authorization': `Bearer ${token}` }),
+        ...options.headers,
+      },
+    };
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+
+      const response = await fetch(url, {
+        ...config,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || `HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      return {
+        success: true,
+        data: data.data || data,
+        message: data.message,
+      };
+    } catch (error: any) {
+      console.error(`[API] Request failed: ${endpoint}`, error);
+      return {
+        success: false,
+        error: error.message || 'Network request failed',
+      };
+    }
+  }
+
+  /**
+   * GET request
+   */
+  private async get<T>(endpoint: string): Promise<APIResponse<T>> {
+    return this.request<T>(endpoint, { method: 'GET' });
+  }
+
+  /**
+   * POST request
+   */
+  private async post<T>(endpoint: string, body?: any): Promise<APIResponse<T>> {
+    return this.request<T>(endpoint, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * PUT request
+   */
+  private async put<T>(endpoint: string, body?: any): Promise<APIResponse<T>> {
+    return this.request<T>(endpoint, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * DELETE request
+   */
+  private async delete<T>(endpoint: string): Promise<APIResponse<T>> {
+    return this.request<T>(endpoint, { method: 'DELETE' });
+  }
+
+  /**
+   * Get auth token from localStorage
+   */
+  private getAuthToken(): string | null {
+    return localStorage.getItem('rfid_auth_token');
+  }
+
+  // ==================== Authentication API ====================
+
+  async login(username: string, password: string): Promise<APIResponse<{ user: User; token: string }>> {
+    return this.post('/auth/login', { username, password });
+  }
+
+  async logout(): Promise<APIResponse> {
+    return this.post('/auth/logout');
+  }
+
+  async refreshToken(): Promise<APIResponse<{ token: string }>> {
+    return this.post('/auth/refresh');
+  }
+
+  async getCurrentUser(): Promise<APIResponse<User>> {
+    return this.get('/auth/me');
+  }
+
+  // ==================== RFID Tags API ====================
+
+  async getTags(params?: {
+    page?: number;
+    limit?: number;
+    startDate?: string;
+    endDate?: string;
+    readerId?: string;
+    tagId?: string;
+    search?: string;
+  }): Promise<APIResponse<{ tags: RFIDTag[]; total: number; page: number; totalPages: number }>> {
+    const queryParams = new URLSearchParams(params as any).toString();
+    return this.get(`/tags?${queryParams}`);
+  }
+
+  async getTagById(id: string): Promise<APIResponse<RFIDTag>> {
+    return this.get(`/tags/${id}`);
+  }
+
+  async deleteTag(id: string): Promise<APIResponse> {
+    return this.delete(`/tags/${id}`);
+  }
+
+  async bulkDeleteTags(ids: string[]): Promise<APIResponse> {
+    return this.post('/tags/bulk-delete', { ids });
+  }
+
+  async exportTags(params?: {
+    format: 'csv' | 'excel' | 'pdf';
+    startDate?: string;
+    endDate?: string;
+    readerId?: string;
+  }): Promise<APIResponse<{ downloadUrl: string }>> {
+    return this.post('/tags/export', params);
+  }
+
+  // ==================== Devices API ====================
+
+  async getDevices(): Promise<APIResponse<Device[]>> {
+    return this.get('/devices');
+  }
+
+  async getDeviceById(id: string): Promise<APIResponse<Device>> {
+    return this.get(`/devices/${id}`);
+  }
+
+  async createDevice(device: Omit<Device, 'id'>): Promise<APIResponse<Device>> {
+    return this.post('/devices', device);
+  }
+
+  async updateDevice(id: string, device: Partial<Device>): Promise<APIResponse<Device>> {
+    return this.put(`/devices/${id}`, device);
+  }
+
+  async deleteDevice(id: string): Promise<APIResponse> {
+    return this.delete(`/devices/${id}`);
+  }
+
+  async getDeviceStats(id: string): Promise<APIResponse<{
+    tagsReadToday: number;
+    tagsReadThisWeek: number;
+    averageRSSI: number;
+    uptime: string;
+  }>> {
+    return this.get(`/devices/${id}/stats`);
+  }
+
+  // ==================== Dashboard API ====================
+
+  async getDashboardStats(): Promise<APIResponse<DashboardStats>> {
+    return this.get('/dashboard/stats');
+  }
+
+  async getDashboardSettings(): Promise<APIResponse<any>> {
+    return this.get('/settings/dashboard');
+  }
+
+  async updateDashboardSettings(body: {
+    tag_dedupe_window_minutes: number;
+    device_offline_minutes: number;
+    auto_refresh_interval_seconds: number;
+  }): Promise<APIResponse<any>> {
+    return this.put('/settings/dashboard', body);
+  }
+
+  async getTagActivity(period: '24h' | '7d' | '30d' = '24h'): Promise<APIResponse<{
+    time: string;
+    count: number;
+  }[]>> {
+    return this.get(`/dashboard/activity?period=${period}`);
+  }
+
+  async getTagsByDevice(): Promise<APIResponse<{
+    device: string;
+    count: number;
+  }[]>> {
+    return this.get('/dashboard/tags-by-device');
+  }
+
+  async getZoneHeatmap(): Promise<APIResponse<{
+    zone: string;
+    count: number;
+    coordinates: { x: number; y: number };
+  }[]>> {
+    return this.get('/dashboard/heatmap');
+  }
+
+  // ==================== User Management API ====================
+
+  async getUsers(): Promise<APIResponse<User[]>> {
+    return this.get('/users');
+  }
+
+  async getUserById(id: string): Promise<APIResponse<User>> {
+    return this.get(`/users/${id}`);
+  }
+
+  async createUser(user: {
+    username: string;
+    email: string;
+    password: string;
+    role: 'admin' | 'user';
+  }): Promise<APIResponse<User>> {
+    return this.post('/users', user);
+  }
+
+  async updateUser(id: string, user: Partial<User>): Promise<APIResponse<User>> {
+    return this.put(`/users/${id}`, user);
+  }
+
+  async deleteUser(id: string): Promise<APIResponse> {
+    return this.delete(`/users/${id}`);
+  }
+
+  async changePassword(userId: string, oldPassword: string, newPassword: string): Promise<APIResponse> {
+    return this.post(`/users/${userId}/change-password`, {
+      oldPassword,
+      newPassword,
+    });
+  }
+
+  // ==================== System Configuration API ====================
+
+  async getSystemConfig(): Promise<APIResponse<{
+    mqttConfig: any;
+    dataRetentionDays: number;
+    apiKey: string;
+    autoRefreshInterval: number;
+  }>> {
+    return this.get('/config');
+  }
+
+  async updateSystemConfig(config: any): Promise<APIResponse> {
+    return this.put('/config', config);
+  }
+
+  async testMQTTConnection(config: {
+    broker: string;
+    port: number;
+    protocol: string;
+    username?: string;
+    password?: string;
+  }): Promise<APIResponse<{ connected: boolean; message: string }>> {
+    return this.post('/config/test-mqtt', config);
+  }
+
+  // ==================== Analytics API ====================
+
+  async getReaderPerformance(readerId?: string, period: '24h' | '7d' | '30d' = '24h'): Promise<APIResponse<{
+    readerId: string;
+    readerName: string;
+    tagsRead: number;
+    averageRSSI: number;
+    uptime: number;
+  }[]>> {
+    const params = readerId ? `?readerId=${readerId}&period=${period}` : `?period=${period}`;
+    return this.get(`/analytics/reader-performance${params}`);
+  }
+
+  async getTagHistory(tagId: string, limit: number = 100): Promise<APIResponse<RFIDTag[]>> {
+    return this.get(`/analytics/tag-history/${tagId}?limit=${limit}`);
+  }
+
+  // ==================== Health Check ====================
+
+  async healthCheck(): Promise<APIResponse<{
+    status: 'healthy' | 'unhealthy';
+    database: boolean;
+    mqtt: boolean;
+    uptime: number;
+  }>> {
+    return this.get('/health');
+  }
+}
+
+// Export singleton instance
+export const apiService = new APIService();
