@@ -7,6 +7,7 @@ import mysql from 'mysql2/promise';
 import mqtt from 'mqtt';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import * as ConfigManager from './config';
 
 dotenv.config();
 
@@ -39,17 +40,19 @@ app.use(cors({
 app.use(compression());
 app.use(express.json());
 
+
 // Database Connection Pool
 const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
+  host: process.env.DB_HOST,
   port: parseInt(process.env.DB_PORT || '3306'),
-  database: process.env.DB_NAME || 'rfid_system_db',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '123456',
+  database: process.env.DB_NAME,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
   waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
+  connectionLimit: parseInt(process.env.DB_CONNECTION_LIMIT || '10'),
+  queueLimit: parseInt(process.env.DB_QUEUE_LIMIT || '0')
 });
+
 
 // In-memory cached dashboard settings with defaults
 let dashboardSettings = {
@@ -183,6 +186,7 @@ function buildBrokerUrl(cfg: any) {
 }
 
 async function connectMQTTWithConfig(cfg: any) {
+  const sysConfig = await ConfigManager.loadSystemConfig(pool);
   try {
     if (!cfg || !cfg.enabled) { 
       console.log('[MQTT] Config not provided or disabled'); 
@@ -213,10 +217,10 @@ async function connectMQTTWithConfig(cfg: any) {
 
     const connectOptions: any = {
       clientId: cfg.clientId || `rfid-backend-${Date.now()}`,
-      clean: true,
-      reconnectPeriod: 5000,
-      connectTimeout: 30_000,
-      keepalive: 60
+      clean: cfg.clean_session ?? sysConfig.mqtt_clean_session,          // ✅ FROM CONFIG
+      reconnectPeriod: cfg.reconnect_period_ms ?? sysConfig.mqtt_reconnect_period_ms,  // ✅
+      connectTimeout: cfg.connect_timeout_ms ?? sysConfig.mqtt_connect_timeout_ms,    // ✅
+      keepalive: cfg.keepalive_sec ?? sysConfig.mqtt_keepalive_sec      // ✅
     };
 
     if (cfg.username) {
@@ -298,6 +302,26 @@ async function connectMQTTWithConfig(cfg: any) {
   } catch (err) {
     mqttConnecting = false;
     console.error('[MQTT] ❌ connectMQTTWithConfig failed:', err);
+  }
+}
+
+async function handleTagMessage(data: any) {
+  try {
+    const tag = normalizeRFIDPayload(data);
+    await saveTagData(tag);
+    const device = extractDeviceFromPayload(data);
+    await upsertReaderDevice(device);
+  } catch (err) {
+    console.error('[MQTT] handleTagMessage error:', err);
+  }
+}
+
+async function handleHeartbeat(data: any) {
+  try {
+    const device = extractDeviceFromPayload(data);
+    await upsertReaderDevice(device);
+  } catch (err) {
+    console.error('[MQTT] handleHeartbeat error:', err);
   }
 }
 
@@ -800,40 +824,312 @@ app.post('/api/settings/mqtt/test', authenticateToken, async (req, res) => {
   }
 });
 
-// Dashboard Settings endpoints
-app.get('/api/settings/dashboard', authenticateToken, async (req, res) => {
+// ============= SYSTEM CONFIGURATION API =============
+
+// Get System Configuration (Admin Only)
+app.get('/api/config', authenticateToken, async (req, res) => {
   try {
-    res.json({ success: true, data: dashboardSettings });
-  } catch (err) {
-    console.error('[Settings] GET error:', err);
-    res.status(500).json({ success: false, error: 'Failed to fetch settings' });
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const [rows]: any = await pool.execute(
+      `SELECT config_key, config_value FROM system_config 
+       WHERE config_key IN ('db_connection_limit', 'mqtt_reconnect_period_ms', 
+       'mqtt_connect_timeout_ms', 'mqtt_keepalive_sec', 'jwt_expires_in', 
+       'data_retention_days', 'default_page_size', 'device_offline_check_interval_sec')`
+    );
+
+    const config: any = {
+      db_connection_limit: 10,
+      mqtt_reconnect_period_ms: 5000,
+      mqtt_connect_timeout_ms: 30000,
+      mqtt_keepalive_sec: 60,
+      jwt_expires_in: '24h',
+      data_retention_days: 30,
+      default_page_size: 20,
+      device_offline_check_interval_sec: 300
+    };
+
+    // Override with database values if they exist
+    rows.forEach((row: any) => {
+      const value = row.config_value;
+      if (value) {
+        // Try to parse as number
+        config[row.config_key] = isNaN(value) ? value : parseInt(value);
+      }
+    });
+
+    res.json({ success: true, data: config });
+  } catch (error) {
+    console.error('[Config] GET error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch config' });
   }
 });
 
-app.put('/api/settings/dashboard', authenticateToken, async (req, res) => {
+// Update System Configuration (Admin Only)
+app.put('/api/config', authenticateToken, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') return res.status(403).json({ success: false, error: 'Admin required' });
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
 
-    const { tag_dedupe_window_minutes, device_offline_minutes, auto_refresh_interval_seconds } = req.body;
+    const config = req.body;
+    const allowedKeys = [
+      'db_connection_limit',
+      'mqtt_reconnect_period_ms',
+      'mqtt_connect_timeout_ms',
+      'mqtt_keepalive_sec',
+      'jwt_expires_in',
+      'data_retention_days',
+      'default_page_size',
+      'device_offline_check_interval_sec'
+    ];
 
-    const [rows]: any = await pool.execute('SELECT id FROM dashboard_settings LIMIT 1');
-    if (rows && rows.length > 0) {
+    // Update each config value
+    for (const [key, value] of Object.entries(config)) {
+      if (!allowedKeys.includes(key)) continue;
+
       await pool.execute(
-        `UPDATE dashboard_settings SET tag_dedupe_window_minutes = ?, device_offline_minutes = ?, auto_refresh_interval_seconds = ?, updated_at = NOW() WHERE id = ?`,
-        [tag_dedupe_window_minutes, device_offline_minutes, auto_refresh_interval_seconds, rows[0].id]
-      );
-    } else {
-      await pool.execute(
-        `INSERT INTO dashboard_settings (tag_dedupe_window_minutes, device_offline_minutes, auto_refresh_interval_seconds) VALUES (?, ?, ?)`,
-        [tag_dedupe_window_minutes, device_offline_minutes, auto_refresh_interval_seconds]
+        `INSERT INTO system_config (config_key, config_value, updated_at)
+         VALUES (?, ?, NOW())
+         ON DUPLICATE KEY UPDATE
+         config_value = VALUES(config_value),
+         updated_at = NOW()`,
+        [key, String(value)]
       );
     }
 
-    await loadDashboardSettingsFromDB();
-    res.json({ success: true, data: dashboardSettings });
-  } catch (err) {
-    console.error('[Settings] PUT error:', err);
-    res.status(500).json({ success: false, error: 'Failed to update settings' });
+    console.log('[Config] Updated system configuration:', config);
+
+    res.json({
+      success: true,
+      message: 'System configuration updated successfully',
+      data: config
+    });
+  } catch (error) {
+    console.error('[Config] PUT error:', error);
+    res.status(500).json({ success: false, error: 'Failed to update config' });
+  }
+});
+
+// ============= USER PREFERENCES API =============
+
+// Get User Preferences
+app.get('/api/user/preferences', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+
+    const [rows]: any = await pool.execute(
+      `SELECT * FROM user_preferences WHERE user_id = ?`,
+      [userId]
+    );
+
+    if (rows.length === 0) {
+      // Return defaults if not found
+      return res.json({ 
+        success: true, 
+        data: {
+          theme: 'light',
+          default_page_size: 20,
+          auto_refresh_enabled: true,
+          auto_refresh_interval_sec: 30,
+          default_map_zoom: 1,
+          desktop_notifications: true
+        }
+      });
+    }
+
+    const prefs = rows[0];
+    res.json({
+      success: true,
+      data: {
+        theme: prefs.theme || 'light',
+        default_page_size: prefs.default_page_size || 20,
+        auto_refresh_enabled: !!prefs.auto_refresh_enabled,
+        auto_refresh_interval_sec: prefs.auto_refresh_interval_sec || 30,
+        default_map_zoom: parseFloat(prefs.default_map_zoom) || 1,
+        desktop_notifications: !!prefs.desktop_notifications
+      }
+    });
+  } catch (error) {
+    console.error('[Preferences] GET error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch preferences' });
+  }
+});
+
+// Update User Preferences
+app.put('/api/user/preferences', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const {
+      theme,
+      default_page_size,
+      auto_refresh_enabled,
+      auto_refresh_interval_sec,
+      default_map_zoom,
+      desktop_notifications
+    } = req.body;
+
+    // Check if record exists
+    const [existing]: any = await pool.execute(
+      `SELECT id FROM user_preferences WHERE user_id = ?`,
+      [userId]
+    );
+
+    if (existing.length > 0) {
+      // Update existing
+      await pool.execute(
+        `UPDATE user_preferences
+         SET theme = ?, default_page_size = ?, auto_refresh_enabled = ?,
+             auto_refresh_interval_sec = ?, default_map_zoom = ?,
+             desktop_notifications = ?, updated_at = NOW()
+         WHERE user_id = ?`,
+        [
+          theme || 'light',
+          default_page_size || 20,
+          auto_refresh_enabled ? 1 : 0,
+          auto_refresh_interval_sec || 30,
+          default_map_zoom || 1,
+          desktop_notifications ? 1 : 0,
+          userId
+        ]
+      );
+    } else {
+      // Insert new
+      await pool.execute(
+        `INSERT INTO user_preferences 
+         (user_id, theme, default_page_size, auto_refresh_enabled,
+          auto_refresh_interval_sec, default_map_zoom, desktop_notifications)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          userId,
+          theme || 'light',
+          default_page_size || 20,
+          auto_refresh_enabled ? 1 : 0,
+          auto_refresh_interval_sec || 30,
+          default_map_zoom || 1,
+          desktop_notifications ? 1 : 0
+        ]
+      );
+    }
+
+    console.log('[Preferences] Updated for user:', userId);
+
+    res.json({
+      success: true,
+      message: 'Preferences updated successfully',
+      data: {
+        theme,
+        default_page_size,
+        auto_refresh_enabled,
+        auto_refresh_interval_sec,
+        default_map_zoom,
+        desktop_notifications
+      }
+    });
+  } catch (error) {
+    console.error('[Preferences] PUT error:', error);
+    res.status(500).json({ success: false, error: 'Failed to update preferences' });
+  }
+});
+
+// ============= DASHBOARD SETTINGS API =============
+
+// Get Dashboard Settings
+app.get('/api/settings/dashboard', authenticateToken, async (req, res) => {
+  try {
+    const [rows]: any = await pool.execute(
+      `SELECT * FROM dashboard_settings LIMIT 1`
+    );
+
+    if (rows.length === 0) {
+      // Return defaults
+      return res.json({
+        success: true,
+        data: {
+          tag_dedupe_window_minutes: 5,
+          device_offline_minutes: 5,
+          auto_refresh_interval_seconds: 30
+        }
+      });
+    }
+
+    const settings = rows[0];
+    res.json({
+      success: true,
+      data: {
+        tag_dedupe_window_minutes: settings.tag_dedupe_window_minutes || 5,
+        device_offline_minutes: settings.device_offline_minutes || 5,
+        auto_refresh_interval_seconds: settings.auto_refresh_interval_seconds || 30
+      }
+    });
+  } catch (error) {
+    console.error('[Dashboard Settings] GET error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch dashboard settings' });
+  }
+});
+
+// Update Dashboard Settings
+app.put('/api/settings/dashboard', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const {
+      tag_dedupe_window_minutes,
+      device_offline_minutes,
+      auto_refresh_interval_seconds
+    } = req.body;
+
+    // Check if settings exist
+    const [existing]: any = await pool.execute(
+      `SELECT id FROM dashboard_settings LIMIT 1`
+    );
+
+    if (existing.length > 0) {
+      // Update existing
+      await pool.execute(
+        `UPDATE dashboard_settings
+         SET tag_dedupe_window_minutes = ?,
+             device_offline_minutes = ?,
+             auto_refresh_interval_seconds = ?,
+             updated_at = NOW()`,
+        [
+          tag_dedupe_window_minutes || 5,
+          device_offline_minutes || 5,
+          auto_refresh_interval_seconds || 30
+        ]
+      );
+    } else {
+      // Insert new
+      await pool.execute(
+        `INSERT INTO dashboard_settings
+         (tag_dedupe_window_minutes, device_offline_minutes, auto_refresh_interval_seconds)
+         VALUES (?, ?, ?)`,
+        [
+          tag_dedupe_window_minutes || 5,
+          device_offline_minutes || 5,
+          auto_refresh_interval_seconds || 30
+        ]
+      );
+    }
+
+    console.log('[Dashboard Settings] Updated');
+
+    res.json({
+      success: true,
+      message: 'Dashboard settings updated successfully',
+      data: {
+        tag_dedupe_window_minutes,
+        device_offline_minutes,
+        auto_refresh_interval_seconds
+      }
+    });
+  } catch (error) {
+    console.error('[Dashboard Settings] PUT error:', error);
+    res.status(500).json({ success: false, error: 'Failed to update dashboard settings' });
   }
 });
 
@@ -847,6 +1143,8 @@ app.post('/api/auth/login', async (req, res) => {
       [username]
     );
 
+    const sysConfig = await ConfigManager.loadSystemConfig(pool);
+    
     if (users.length === 0) {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
@@ -858,9 +1156,17 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
+    let expiresIn: string | number = '24h';
+    if (sysConfig.jwt_expires_in) {
+      expiresIn = typeof sysConfig.jwt_expires_in === 'number' 
+        ? sysConfig.jwt_expires_in 
+        : String(sysConfig.jwt_expires_in);
+    }
+    
+    const secret: string = process.env.JWT_SECRET || 'your-secret-key';
     const token = jwt.sign(
       { userId: user.id, username: user.username, role: user.role },
-      process.env.JWT_SECRET || 'your-secret-key',
+      secret,
       { expiresIn: '24h' }
     );
 
@@ -890,6 +1196,7 @@ app.post('/api/auth/login', async (req, res) => {
 // Get Tags
 app.get('/api/tags', authenticateToken, async (req, res) => {
   try {
+    const sysConfig = await ConfigManager.loadSystemConfig(pool);
     const { page = 1, limit = 100, startDate, endDate, readerId } = req.query;
     
     let query = 'SELECT * FROM rfid_tags WHERE 1=1';
@@ -909,7 +1216,7 @@ app.get('/api/tags', authenticateToken, async (req, res) => {
     }
 
     const pageNum = parseInt(page as string) || 1;
-    const limitNum = parseInt(limit as string) || 100;
+    const limitNum = parseInt(limit as string) || sysConfig.default_page_size;  // ✅ FROM CONFIG
     const offset = (pageNum - 1) * limitNum;
 
     query += ` ORDER BY read_time DESC LIMIT ${limitNum} OFFSET ${offset}`;
@@ -1149,138 +1456,36 @@ app.delete('/api/users/:id', authenticateToken, async (req, res) => {
   }
 });
 
-async function handleTagMessage(data: any) {
+// ============================================
+// SERVER STARTUP
+// ============================================
+
+// Initialize server on startup
+async function startServer() {
   try {
-    const tag = normalizeRFIDPayload(data);
+    // Ensure database schema and tables exist
+    await ensureSchema();
+    console.log('[DB] Schema ensured');
 
-    if (!tag || !tag.epc) return;
+    // Load dashboard settings from database
+    await loadDashboardSettingsFromDB();
 
-    const readerId = tag.reader_id || 'unknown';
-    const dedupeMinutes = dashboardSettings.tag_dedupe_window_minutes || 5;
-
-    let shouldIncrement = true;
-    try {
-      const [rows]: any = await pool.execute(
-        'SELECT last_seen_at FROM tag_read_dedupe WHERE epc = ? AND reader_id = ? LIMIT 1',
-        [tag.epc, readerId]
-      );
-
-      if (rows && rows.length > 0) {
-        const lastSeen = new Date(rows[0].last_seen_at).getTime();
-        const now = Date.now();
-        if (now - lastSeen < dedupeMinutes * 60 * 1000) {
-          shouldIncrement = false;
-        }
-      }
-    } catch (err) {
-      console.error('[MQTT] dedupe lookup error:', err);
+    // Load MQTT configuration and connect if enabled
+    const mqttConfig = await loadMQTTConfigFromDB();
+    if (mqttConfig && mqttConfig.enabled) {
+      await connectMQTTWithConfig(mqttConfig);
     }
 
-    try {
-      await pool.execute(
-        `INSERT INTO tag_read_dedupe (epc, reader_id, last_seen_at) VALUES (?, ?, NOW())
-         ON DUPLICATE KEY UPDATE last_seen_at = NOW()`,
-        [tag.epc, readerId]
-      );
-    } catch (err) {
-      console.error('[MQTT] dedupe upsert error:', err);
-    }
-
-    const deviceInfo = extractDeviceFromPayload(data);
-    deviceInfo.tags_read_increment = shouldIncrement ? 1 : 0;
-    await upsertReaderDevice(deviceInfo);
-
-    await saveTagData(tag);
-
-    console.log('[MQTT] Tag processed, epc=', tag.epc, 'incremented=', shouldIncrement);
-  } catch (err) {
-    console.error('[MQTT] handleTagMessage error:', err);
+    // Start HTTP server
+    app.listen(PORT, () => {
+      console.log(`[Server] ✅ Server listening on port ${PORT}`);
+      console.log(`[Server] API available at http://localhost:${PORT}`);
+    });
+  } catch (error) {
+    console.error('[Server] Startup error:', error);
+    process.exit(1);
   }
 }
 
-async function handleHeartbeat(data: any) {
-  try {
-    const deviceInfo = extractDeviceFromPayload(data);
-    await upsertReaderDevice(deviceInfo);
-    console.log('[MQTT] Heartbeat processed for', deviceInfo.id);
-  } catch (err) {
-    console.error('[MQTT] handleHeartbeat error:', err);
-  }
-}
-
-// Error Handler
-app.use((err: any, req: any, res: any, next: any) => {
-  console.error('[Server] Error:', err);
-  res.status(500).json({ success: false, error: 'Internal server error' });
-});
-
-// Start Server
-app.listen(PORT, () => {
-  console.log(`[Server] Running on port ${PORT}`);
-  console.log(`[Server] Environment: ${process.env.NODE_ENV || 'development'}`);
-
-  // Initialize without auto-connecting MQTT
-  (async () => {
-    try {
-      await ensureSchema();
-      await loadDashboardSettingsFromDB();
-      scheduleDailyReset();
-      scheduleDeviceOfflineUpdater();
-
-      // Check if MQTT config exists and is enabled
-      const cfg = await loadMQTTConfigFromDB();
-      if (cfg && cfg.enabled) {
-        console.log('[MQTT] Found enabled configuration in database');
-        await connectMQTTWithConfig(cfg);
-      } else {
-        console.log('[MQTT] ⚠️  No MQTT configuration found or disabled');
-        console.log('[MQTT] 📝 Please configure MQTT broker in Settings page');
-      }
-    } catch (err) {
-      console.error('[Server] Startup init failed:', err);
-    }
-  })();
-});
-
-function scheduleDailyReset() {
-  const resetFn = async () => {
-    try {
-      await pool.execute('UPDATE devices SET tags_read_today = 0');
-      console.log('[Maintenance] Reset tags_read_today to 0');
-    } catch (err) {
-      console.error('[Maintenance] Failed to reset tags_read_today:', err);
-    }
-  };
-
-  const now = new Date();
-  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-  const msUntilNext = next.getTime() - now.getTime();
-
-  setTimeout(() => {
-    resetFn();
-    setInterval(resetFn, 24 * 60 * 60 * 1000);
-  }, msUntilNext);
-}
-
-function scheduleDeviceOfflineUpdater() {
-  const checkFn = async () => {
-    try {
-      const mins = dashboardSettings.device_offline_minutes || 5;
-      await pool.execute(`
-        UPDATE devices
-        SET status = 'offline'
-        WHERE last_seen < DATE_SUB(NOW(), INTERVAL ? MINUTE)
-      `, [mins]);
-    } catch (err) {
-      console.error('[Maintenance] Device offline updater failed:', err);
-    }
-  };
-  setInterval(checkFn, 30_000);
-}
-
-process.on('SIGTERM', () => {
-  console.log('[Server] SIGTERM received, closing gracefully');
-  mqttClient?.end();
-  pool.end();
-  process.exit(0);
-});
+// Start the server
+startServer();

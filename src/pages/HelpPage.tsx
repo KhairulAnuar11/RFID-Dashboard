@@ -227,7 +227,7 @@ export const HelpPage: React.FC = () => {
   };
 
   const copyEmail = () => {
-    navigator.clipboard.writeText('support@rfidtracker.com');
+    navigator.clipboard.writeText('sales@clbgroups.com');
     setCopiedEmail(true);
     setTimeout(() => setCopiedEmail(false), 2000);
   };
@@ -688,7 +688,7 @@ export const HelpPage: React.FC = () => {
                         Get detailed help via email. Average response time: 2 hours
                       </p>
                       <div className="flex items-center gap-2">
-                        <span className="text-blue-600 font-medium">support@rfidtracker.com</span>
+                        <span className="text-blue-600 font-medium">sales@clbgroups.com</span>
                         <button
                           onClick={copyEmail}
                           className="p-1 hover:bg-blue-200 rounded transition-colors"

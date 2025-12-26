@@ -1,17 +1,13 @@
 /// <reference types="vite/client" />
 
 // API Service Layer for backend communication
+// Complete merged version with all configuration endpoints
 // Ready for production deployment with environment configuration
 
 import { RFIDTag, Device, User, DashboardStats } from '../types';
 
-// API Configuration
-const API_CONFIG = {
-  baseURL: import.meta.env.VITE_API_URL ||
-  "http://localhost:3001/api",
-  timeout: 30000,
-  retryAttempts: 3,
-};
+// Fetch from window.location for dynamic API URL
+const API_URL = `${window.location.protocol}//${window.location.hostname}:3001/api`;
 
 interface APIResponse<T = any> {
   success: boolean;
@@ -24,9 +20,9 @@ class APIService {
   private baseURL: string;
   private timeout: number;
 
-  constructor() {
-    this.baseURL = API_CONFIG.baseURL;
-    this.timeout = API_CONFIG.timeout;
+  constructor(baseURL: string, timeout: number) {
+    this.baseURL = baseURL;
+    this.timeout = timeout;
   }
 
   /**
@@ -211,7 +207,11 @@ class APIService {
     return this.get('/dashboard/stats');
   }
 
-  async getDashboardSettings(): Promise<APIResponse<any>> {
+  async getDashboardSettings(): Promise<APIResponse<{
+    tag_dedupe_window_minutes: number;
+    device_offline_minutes: number;
+    auto_refresh_interval_seconds: number;
+  }>> {
     return this.get('/settings/dashboard');
   }
 
@@ -243,6 +243,138 @@ class APIService {
     coordinates: { x: number; y: number };
   }[]>> {
     return this.get('/dashboard/heatmap');
+  }
+
+  // ==================== MQTT Configuration API ====================
+
+  async getMQTTConfig(): Promise<APIResponse<{
+    broker: string;
+    port: number;
+    protocol: string;
+    username: string;
+    clientId: string;
+    topics: string[];
+    qos: number;
+    enabled: boolean;
+    hasPassword: boolean;
+  }>> {
+    return this.get('/settings/mqtt');
+  }
+
+  async saveMQTTConfig(config: {
+    broker: string;
+    port: number;
+    protocol: string;
+    username?: string;
+    password?: string;
+    client_id?: string;
+    topics: string[];
+    qos?: number;
+    enabled: boolean;
+  }): Promise<APIResponse> {
+    return this.post('/settings/mqtt', config);
+  }
+
+  async testMQTTConnection(config: {
+    broker: string;
+    port: number;
+    protocol: string;
+    username?: string;
+    password?: string;
+    client_id?: string;
+  }): Promise<APIResponse<{ connected: boolean; message: string; status?: string }>> {
+    return this.post('/settings/mqtt/test', config);
+  }
+
+  async getMQTTStatus(): Promise<APIResponse<{
+    status: 'connected' | 'reconnecting' | 'disconnected' | 'error';
+    message?: string;
+    uptime?: number;
+    lastError?: string;
+  }>> {
+    return this.get('/settings/mqtt/status');
+  }
+
+  async getMQTTDebug(): Promise<APIResponse<any>> {
+    return this.get('/settings/mqtt/debug');
+  }
+
+  // ==================== System Configuration API (Admin Only) ====================
+
+  async getSystemConfig(): Promise<APIResponse<{
+    db_connection_limit: number;
+    db_queue_limit?: number;
+    mqtt_reconnect_period_ms: number;
+    mqtt_connect_timeout_ms: number;
+    mqtt_keepalive_sec: number;
+    mqtt_clean_session?: boolean;
+    jwt_expires_in: string;
+    session_timeout_minutes?: number;
+    data_retention_days: number;
+    cleanup_interval_hours?: number;
+    default_page_size: number;
+    max_page_size?: number;
+    device_offline_check_interval_sec: number;
+    stats_cache_duration_sec?: number;
+    log_level?: string;
+  }>> {
+    return this.get('/config');
+  }
+
+  async updateSystemConfig(config: Partial<{
+    db_connection_limit: number;
+    db_queue_limit: number;
+    mqtt_reconnect_period_ms: number;
+    mqtt_connect_timeout_ms: number;
+    mqtt_keepalive_sec: number;
+    mqtt_clean_session: boolean;
+    jwt_expires_in: string;
+    data_retention_days: number;
+    cleanup_interval_hours: number;
+    default_page_size: number;
+    max_page_size: number;
+    device_offline_check_interval_sec: number;
+  }>): Promise<APIResponse> {
+    return this.put('/config', config);
+  }
+
+  // ==================== User Preferences API ====================
+
+  async getUserPreferences(): Promise<APIResponse<any>> {
+    return this.get('/user/preferences');
+  }
+
+  async updateUserPreferences(preferences: any): Promise<APIResponse<any>> {
+    return this.put('/user/preferences', preferences);
+  }
+
+  // ==================== Frontend Configuration API (Public) ====================
+
+  async getFrontendConfig(): Promise<APIResponse<{
+    app_name: string;
+    app_version: string;
+    company_name: string;
+    support_email: string;
+    primary_color: string;
+    features: {
+      location_map: boolean;
+      analytics: boolean;
+      export: boolean;
+    };
+  }>> {
+    return this.get('/config');
+  }
+
+  async updateFrontendConfig(config: Partial<{
+    app_name: string;
+    company_name: string;
+    support_email: string;
+    primary_color: string;
+    enable_location_map: boolean;
+    enable_analytics: boolean;
+    enable_export: boolean;
+  }>): Promise<APIResponse> {
+    return this.put('/settings/frontend', config);
   }
 
   // ==================== User Management API ====================
@@ -279,31 +411,6 @@ class APIService {
     });
   }
 
-  // ==================== System Configuration API ====================
-
-  async getSystemConfig(): Promise<APIResponse<{
-    mqttConfig: any;
-    dataRetentionDays: number;
-    apiKey: string;
-    autoRefreshInterval: number;
-  }>> {
-    return this.get('/config');
-  }
-
-  async updateSystemConfig(config: any): Promise<APIResponse> {
-    return this.put('/config', config);
-  }
-
-  async testMQTTConnection(config: {
-    broker: string;
-    port: number;
-    protocol: string;
-    username?: string;
-    password?: string;
-  }): Promise<APIResponse<{ connected: boolean; message: string }>> {
-    return this.post('/config/test-mqtt', config);
-  }
-
   // ==================== Analytics API ====================
 
   async getReaderPerformance(readerId?: string, period: '24h' | '7d' | '30d' = '24h'): Promise<APIResponse<{
@@ -334,4 +441,5 @@ class APIService {
 }
 
 // Export singleton instance
-export const apiService = new APIService();
+export const apiService = new APIService(API_URL, 30000);
+export default apiService;

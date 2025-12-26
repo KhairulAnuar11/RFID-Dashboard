@@ -75,6 +75,9 @@ export interface MQTTConfig {
   username?: string;
   password?: string;
   topics: string[];
+  client_id?: string;
+  qos?: number;
+  enabled: boolean;
 }
 
 export interface SystemConfig {

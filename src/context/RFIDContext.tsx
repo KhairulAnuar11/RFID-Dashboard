@@ -34,7 +34,8 @@ const defaultConfig: SystemConfig = {
     protocol: (import.meta.env.VITE_MQTT_PROTOCOL as 'mqtt' | 'ws' | 'wss') || 'wss',
     username: '',
     password: '',
-    topics: ['rfid/readers/+/tags', 'rfid/events', 'rfid/+/data']
+    topics: ['rfid/readers/+/tags', 'rfid/events', 'rfid/+/data'],
+    enabled: true
   },
   dataRetentionDays: parseInt(import.meta.env.VITE_DATA_RETENTION_DAYS) || 30,
   apiKey: 'your-api-key-here',
