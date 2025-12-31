@@ -10,7 +10,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
 
 export const DashboardPage: React.FC = () => {
-  const { stats, tags, isConnected, connectionStatus, refreshData, clearTags } = useRFID();
+  const { stats, tags, isConnected, connectionStatus, refreshData, clearTags, statsTrends } = useRFID();
   const [activityData, setActivityData] = useState<{ time: string; count: number }[]>([]);
   const [deviceData, setDeviceData] = useState<{ device: string; count: number }[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -29,6 +29,22 @@ export const DashboardPage: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
+  const normalize24HourData = (
+  rawData: { time: string; count: number }[]
+    ) => {
+      const fullDay = Array.from({ length: 24 }, (_, hour) => {
+        const label = hour.toString().padStart(2, '0') + ':00';
+        const found = rawData.find(d => d.time === label);
+
+        return {
+          time: label,
+          count: found ? found.count : 0
+        };
+      });
+
+      return fullDay;
+    };
+
   const loadChartData = async () => {
     try {
       const [activityResponse, deviceResponse] = await Promise.all([
@@ -37,7 +53,8 @@ export const DashboardPage: React.FC = () => {
       ]);
 
       if (activityResponse.success && activityResponse.data) {
-        setActivityData(activityResponse.data);
+        setActivityData(normalize24HourData(activityResponse.data));
+
       }
 
       if (deviceResponse.success && deviceResponse.data) {
@@ -66,6 +83,28 @@ export const DashboardPage: React.FC = () => {
 
   // Live tag stream (last 10 tags)
   const recentTags = tags.slice(0, 10);
+
+  // Format a timestamp string (ISO or "YYYY-MM-DD HH:MM:SS") as UTC time HH:MM:SS
+  const formatUTCTime = (raw?: string | null) => {
+    try {
+      if (!raw) return new Date().toUTCString().split(' ')[4];
+      let s = raw.trim();
+      // If local-style DB string, convert to ISO-like with Z
+      if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) {
+        s = s.replace(' ', 'T') + 'Z';
+      } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s)) {
+        s = s + 'Z';
+      }
+      const d = new Date(s);
+      if (isNaN(d.getTime())) return new Date().toUTCString().split(' ')[4];
+      const hh = String(d.getUTCHours()).padStart(2, '0');
+      const mm = String(d.getUTCMinutes()).padStart(2, '0');
+      const ss = String(d.getUTCSeconds()).padStart(2, '0');
+      return `${hh}:${mm}:${ss}`;
+    } catch {
+      return new Date().toUTCString().split(' ')[4];
+    }
+  };
 
   return (
     <div className="flex-1 flex flex-col bg-gray-50">
@@ -117,7 +156,7 @@ export const DashboardPage: React.FC = () => {
               value={stats.totalTagsToday}
               icon={Tag}
               color="blue"
-              trend={{ value: 12.5, isPositive: true }}
+              trend={statsTrends.tagsToday}
             />
           </motion.div>
           
@@ -131,6 +170,7 @@ export const DashboardPage: React.FC = () => {
               value={stats.activeReaders}
               icon={Radio}
               color="green"
+              trend={statsTrends.activeReaders}
             />
           </motion.div>
           
@@ -144,7 +184,7 @@ export const DashboardPage: React.FC = () => {
               value={stats.uniqueTags}
               icon={Hash}
               color="purple"
-              trend={{ value: 5.2, isPositive: true }}
+              trend={statsTrends.uniqueTags}
             />
           </motion.div>
           
@@ -232,7 +272,7 @@ export const DashboardPage: React.FC = () => {
                   <div className="text-right">
                     <p className="text-sm text-gray-700">{tag.readerName}</p>
                     <p className="text-xs text-gray-500">
-                      {new Date(tag.timestamp).toLocaleTimeString()} | RSSI: {tag.rssi}dBm | Ant: {tag.antenna}
+                      {formatUTCTime(tag.timestamp ?? tag.readTime ?? tag.read_time)} | RSSI: {tag.rssi}dBm | Ant: {tag.antenna}
                     </p>
                   </div>
                 </motion.div>

@@ -10,6 +10,7 @@ import { DevicesPage } from './pages/DevicesPage';
 import { LocationPage } from './pages/LocationPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { HelpPage } from './pages/HelpPage';
+import { AnalyticsPage } from './pages/AnalyticsPage';
 import { Toaster } from 'sonner';
 
 
@@ -96,6 +97,16 @@ function App() {
                 <ProtectedRoute>
                   <MainLayout>
                     <HelpPage />
+                  </MainLayout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/analytics"
+              element={
+                <ProtectedRoute>
+                  <MainLayout>
+                    <AnalyticsPage />
                   </MainLayout>
                 </ProtectedRoute>
               }

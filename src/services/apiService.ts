@@ -149,6 +149,10 @@ class APIService {
     return this.get(`/tags?${queryParams}`);
   }
 
+  async saveTags(tags: RFIDTag[]): Promise<APIResponse> {
+    return this.post(`/tags`, { tags });
+  }
+
   async getTagById(id: string): Promise<APIResponse<RFIDTag>> {
     return this.get(`/tags/${id}`);
   }
@@ -205,6 +209,14 @@ class APIService {
 
   async getDashboardStats(): Promise<APIResponse<DashboardStats>> {
     return this.get('/dashboard/stats');
+  }
+
+  async getYesterdayStats(): Promise<APIResponse<{
+    totalTags: number;
+    uniqueTags: number;
+    activeReaders: number;
+  }>> {
+    return this.get('/dashboard/stats-yesterday');
   }
 
   async getDashboardSettings(): Promise<APIResponse<{
@@ -426,6 +438,36 @@ class APIService {
 
   async getTagHistory(tagId: string, limit: number = 100): Promise<APIResponse<RFIDTag[]>> {
     return this.get(`/analytics/tag-history/${tagId}?limit=${limit}`);
+  }
+
+  // ==================== Analytics Endpoints ====================
+
+  async getWeeklyTrends(): Promise<APIResponse<any[]>> {
+    return this.get('/analytics/weekly-trends');
+  }
+
+  async getAntennaStats(): Promise<APIResponse<any[]>> {
+    return this.get('/analytics/antenna-stats');
+  }
+
+  async getHourlyPatterns(): Promise<APIResponse<any[]>> {
+    return this.get('/analytics/hourly-patterns');
+  }
+
+  async getAssetsByLocation(): Promise<APIResponse<any[]>> {
+    return this.get('/analytics/assets-by-location');
+  }
+
+  async getTopTags(days: number = 30, limit: number = 10): Promise<APIResponse<any[]>> {
+    return this.get(`/analytics/top-tags?days=${days}&limit=${limit}`);
+  }
+
+  async getDevicePerformance(): Promise<APIResponse<any[]>> {
+    return this.get('/analytics/device-performance');
+  }
+
+  async getDailyTrends(days: number = 30): Promise<APIResponse<any[]>> {
+    return this.get(`/analytics/daily-trends?days=${days}`);
   }
 
   // ==================== Health Check ====================

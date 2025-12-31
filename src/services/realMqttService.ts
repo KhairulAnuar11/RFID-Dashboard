@@ -262,15 +262,31 @@ class RealMQTTService {
 
       const d = payload.data;
 
+      // Normalize ReadTime to ISO UTC reliably (treat "YYYY-MM-DD HH:MM:SS" as UTC)
+      const normalizeReadTime = (s: any) => {
+        if (!s) return null;
+        if (s instanceof Date) return isNaN(s.getTime()) ? null : s.toISOString();
+        let str = String(s).trim();
+        if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(str)) {
+          str = str.replace(' ', 'T') + 'Z';
+        } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(str)) {
+          str = str + 'Z';
+        }
+        const dObj = new Date(str);
+        return isNaN(dObj.getTime()) ? null : dObj.toISOString();
+      };
+
+      const timestampISO = normalizeReadTime(d.ReadTime) || new Date().toISOString();
+
       const tag: RFIDTag = {
-        id: `${d.EPC}-${d.ReadTime}`,
+        id: `${d.EPC}-${timestampISO}`,
         tagId: d.TID || '',
         epc: d.EPC,
         rssi: d.RSSI,
         readerId: d.Device,
         readerName: d.Device,
         antenna: Number(d.AntId) || 1,
-        timestamp: new Date(d.ReadTime).toISOString(),
+        timestamp: timestampISO,
         count: 1
       };
 

@@ -8,7 +8,8 @@ import {
   Settings, 
   HelpCircle, 
   LogOut,
-  Activity
+  Activity,
+  BarChart3
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
@@ -17,6 +18,7 @@ export const Sidebar: React.FC = () => {
 
   const navItems = [
     { path: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
+    { path: '/analytics', icon: BarChart3, label: 'Analytics' },
     { path: '/tags', icon: Tag, label: 'Tag Data' },
     { path: '/devices', icon: Radio, label: 'Devices' },
     { path: '/location', icon: Map, label: 'Reader Map' },

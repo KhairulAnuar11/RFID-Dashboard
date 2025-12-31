@@ -7,7 +7,6 @@ import mysql from 'mysql2/promise';
 import mqtt from 'mqtt';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import * as ConfigManager from './config';
 
 dotenv.config();
 
@@ -28,400 +27,177 @@ const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(helmet());
-const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173', 'http://localhost:3000'];
-console.log('[Server] Allowed CORS origins:', allowedOrigins);
 app.use(cors({
-  origin: allowedOrigins,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-  credentials: true,
-  optionsSuccessStatus: 200
+  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173'],
+  credentials: true
 }));
 app.use(compression());
 app.use(express.json());
 
-
 // Database Connection Pool
 const pool = mysql.createPool({
-  host: process.env.DB_HOST,
+  host: process.env.DB_HOST || 'localhost',
   port: parseInt(process.env.DB_PORT || '3306'),
-  database: process.env.DB_NAME,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME || 'rfid_system_db',
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '123456',
   waitForConnections: true,
-  connectionLimit: parseInt(process.env.DB_CONNECTION_LIMIT || '10'),
-  queueLimit: parseInt(process.env.DB_QUEUE_LIMIT || '0')
+  connectionLimit: 10,
+  queueLimit: 0
 });
 
-
-// In-memory cached dashboard settings with defaults
-let dashboardSettings = {
-  tag_dedupe_window_minutes: 5,
-  device_offline_minutes: 5,
-  auto_refresh_interval_seconds: 30
-};
-
-// MQTT Client - Backend only
+// MQTT Client
 let mqttClient: mqtt.MqttClient | null = null;
-let mqttStatus = 'disconnected';
-let mqttConnecting = false;
 
-// Ensure required tables exist for new features
-async function ensureSchema() {
-  try {
-    // rfid_tags table for storing all tag reads
-    await pool.execute(`
-      CREATE TABLE IF NOT EXISTS rfid_tags (
-        id INT PRIMARY KEY AUTO_INCREMENT,
-        epc VARCHAR(255) NOT NULL,
-        tid VARCHAR(255),
-        rssi INT,
-        antenna INT,
-        reader_id VARCHAR(255),
-        reader_name VARCHAR(255),
-        read_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        raw_payload LONGTEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_read_time (read_time),
-        INDEX idx_reader_name (reader_name),
-        INDEX idx_epc (epc)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    `);
+function connectMQTT() {
+  const brokerUrl = process.env.MQTT_BROKER || 'mqtt://localhost:1883';
+  mqttClient = mqtt.connect(brokerUrl, {
+    username: process.env.MQTT_USERNAME,
+    password: process.env.MQTT_PASSWORD,
+    clientId: `rfid_backend_${Math.random().toString(16).substr(2, 8)}`
+  });
 
-    // dashboard_settings table (single row expected)
-    await pool.execute(`
-      CREATE TABLE IF NOT EXISTS dashboard_settings (
-        id INT PRIMARY KEY AUTO_INCREMENT,
-        tag_dedupe_window_minutes INT DEFAULT 5,
-        device_offline_minutes INT DEFAULT 5,
-        auto_refresh_interval_seconds INT DEFAULT 30,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    `);
+  mqttClient.on('connect', () => {
+    console.log('[MQTT] Connected to broker');
+    mqttClient?.subscribe('rfid/readers/+/tags', { qos: 1 });
+  });
 
-    // tag_read_dedupe table to deduplicate tags per reader within time window
-    await pool.execute(`
-      CREATE TABLE IF NOT EXISTS tag_read_dedupe (
-        epc VARCHAR(255) NOT NULL,
-        reader_id VARCHAR(255) NOT NULL,
-        last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (epc, reader_id)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    `);
-  } catch (err) {
-    console.error('[DB] ensureSchema error:', err);
-  }
+  mqttClient.on('message', async (topic, payload) => {
+    try {
+      console.log('[MQTT] Received message on topic:', topic);
+      console.log('[MQTT] Raw payload:', payload.toString());
+      const data = JSON.parse(payload.toString());
+      console.log('[MQTT] Parsed data:', JSON.stringify(data, null, 2));
+      await saveTagData(data);
+    } catch (error) {
+      console.error('[MQTT] Error processing message:', error);
+    }
+  });
+
+  mqttClient.on('error', (error) => {
+    console.error('[MQTT] Connection error:', error);
+  });
 }
 
-// Load dashboard settings into memory (first row) or write defaults if missing
-async function loadDashboardSettingsFromDB() {
-  try {
-    const [rows]: any = await pool.execute('SELECT * FROM dashboard_settings LIMIT 1');
-    if (rows && rows.length > 0) {
-      const r = rows[0];
-      dashboardSettings = {
-        tag_dedupe_window_minutes: r.tag_dedupe_window_minutes || dashboardSettings.tag_dedupe_window_minutes,
-        device_offline_minutes: r.device_offline_minutes || dashboardSettings.device_offline_minutes,
-        auto_refresh_interval_seconds: r.auto_refresh_interval_seconds || dashboardSettings.auto_refresh_interval_seconds
-      };
-    } else {
-      await pool.execute(
-        'INSERT INTO dashboard_settings (tag_dedupe_window_minutes, device_offline_minutes, auto_refresh_interval_seconds) VALUES (?, ?, ?)',
-        [dashboardSettings.tag_dedupe_window_minutes, dashboardSettings.device_offline_minutes, dashboardSettings.auto_refresh_interval_seconds]
-      );
+
+function getSafeReadTime(input: any): string {
+  let parsedDate: Date | null = null;
+
+  // Robust parsing: accept ISO, space-separated local datetimes and treat
+  // incoming strings as UTC when no timezone is provided. This makes server
+  // behaviour deterministic regardless of host local timezone/clock.
+  if (typeof input === 'string') {
+    let s = input.trim();
+
+    // Common format 'YYYY-MM-DD HH:MM:SS' -> convert to 'YYYY-MM-DDTHH:MM:SSZ' (UTC)
+    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) {
+      s = s.replace(' ', 'T') + 'Z';
+    } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s)) {
+      // If string has no timezone, assume UTC
+      s = s + 'Z';
     }
-    console.log('[Settings] Loaded dashboard settings', dashboardSettings);
-  } catch (err) {
-    console.error('[Settings] loadDashboardSettingsFromDB error:', err);
+
+    parsedDate = new Date(s);
+    if (isNaN(parsedDate.getTime())) parsedDate = null;
+  } else if (input instanceof Date) {
+    if (!isNaN(input.getTime())) parsedDate = input;
   }
+
+  const now = new Date();
+  const finalDate = parsedDate || now;
+
+  // Guard: if incoming date is obviously in the future (more than 1 day ahead)
+  // or has a year far from current, treat as server 'now' to avoid reader clock errors
+  const maxFutureMs = 24 * 60 * 60 * 1000; // 1 day
+  if (finalDate.getTime() - now.getTime() > maxFutureMs) {
+    // use server UTC now
+    parsedDate = now;
+  } else if (finalDate.getUTCFullYear() > now.getUTCFullYear() + 1) {
+    parsedDate = now;
+  }
+
+  const useDate = parsedDate || now;
+
+  // Format to MySQL DATETIME (YYYY-MM-DD HH:MM:SS) using UTC components
+  const year = useDate.getUTCFullYear();
+  const month = String(useDate.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(useDate.getUTCDate()).padStart(2, '0');
+  const hours = String(useDate.getUTCHours()).padStart(2, '0');
+  const minutes = String(useDate.getUTCMinutes()).padStart(2, '0');
+  const seconds = String(useDate.getUTCSeconds()).padStart(2, '0');
+
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
-// Load MQTT configuration from database
-async function loadMQTTConfigFromDB() {
+// Convert a local datetime string "YYYY-MM-DD HH:MM:SS" to an ISO string
+function localDatetimeToISOString(localStr: string): string | null {
+  if (!localStr) return null;
+  // Expect format 'YYYY-MM-DD HH:MM:SS' or similar
+  const m = localStr.match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return null;
+  // Interpret DB-stored datetimes as UTC (we store UTC values now)
   try {
-    const [rows]: any = await pool.execute(
-      'SELECT * FROM mqtt_config WHERE enabled = 1 LIMIT 1'
-    );
-
-    if (!rows || rows.length === 0) return null;
-    const cfg = rows[0];
-    let topics: string[] = [];
-
-    if (Array.isArray(cfg.topics)) {
-      topics = cfg.topics;
-    } else if (typeof cfg.topics === 'string') {
-      topics = JSON.parse(cfg.topics);
-    }
-
-    topics = topics.filter(Boolean);
-    return {
-      broker: cfg.broker,
-      port: cfg.port,
-      protocol: cfg.protocol,
-      username: cfg.username,
-      password: cfg.password,
-      clientId: cfg.client_id,
-      topics,
-      qos: cfg.qos ?? 0,
-      enabled: !!cfg.enabled
-    };
-  } catch (err) {
-    console.error('[MQTT] Failed to load config from DB:', err);
+    const isoLike = m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] + 'Z';
+    const d = new Date(isoLike);
+    if (isNaN(d.getTime())) return null;
+    return d.toISOString();
+  } catch {
     return null;
   }
 }
 
-function buildBrokerUrl(cfg: any) {
-  if (!cfg) return null;
-  const host = cfg.broker;
-  const port = cfg.port ? `:${cfg.port}` : '';
-  const protocol = cfg.protocol || 'mqtt';
-  
-  if (protocol === 'ws' || protocol === 'wss') {
-    return `${protocol}://${host}${port}`;
+// Normalize arbitrary input into an ISO UTC string. This is used when
+// returning timestamps to the frontend so `new Date(...)` parsing is reliable.
+function normalizeToISOStringUTC(input: any): string | null {
+  if (!input) return null;
+  if (input instanceof Date) {
+    if (isNaN(input.getTime())) return null;
+    return input.toISOString();
   }
-  if (protocol === 'mqtts') return `mqtts://${host}${port}`;
-  return `mqtt://${host}${port}`;
-}
-
-async function connectMQTTWithConfig(cfg: any) {
-  const sysConfig = await ConfigManager.loadSystemConfig(pool);
-  try {
-    if (!cfg || !cfg.enabled) { 
-      console.log('[MQTT] Config not provided or disabled'); 
-      return; 
-    }
-    if (mqttConnecting) { 
-      console.log('[MQTT] Connection already in progress'); 
-      return; 
-    }
-    mqttConnecting = true;
-
-    await disconnectMQTT();
-
-    const url = buildBrokerUrl(cfg);
-    if (!url) { 
-      mqttConnecting = false; 
-      return; 
-    }
-
-    console.log('[MQTT] Backend connecting with:', {
-      url,
-      clientId: cfg.clientId,
-      username: cfg.username,
-      hasPassword: !!cfg.password,
-      protocol: cfg.protocol,
-      topics: cfg.topics
-    });
-
-    const connectOptions: any = {
-      clientId: cfg.clientId || `rfid-backend-${Date.now()}`,
-      clean: cfg.clean_session ?? sysConfig.mqtt_clean_session,          // ✅ FROM CONFIG
-      reconnectPeriod: cfg.reconnect_period_ms ?? sysConfig.mqtt_reconnect_period_ms,  // ✅
-      connectTimeout: cfg.connect_timeout_ms ?? sysConfig.mqtt_connect_timeout_ms,    // ✅
-      keepalive: cfg.keepalive_sec ?? sysConfig.mqtt_keepalive_sec      // ✅
-    };
-
-    if (cfg.username) {
-      connectOptions.username = cfg.username;
-    }
-    if (cfg.password) {
-      connectOptions.password = cfg.password;
-    }
-
-    mqttClient = mqtt.connect(url, connectOptions);
-
-    mqttClient.on('connect', () => {
-      mqttStatus = 'connected';
-      mqttConnecting = false;
-      console.log('[MQTT] ✅ Backend connected to broker', url);
-      
-      const topics: string[] = cfg.topics || [];
-      if (topics.length > 0) {
-        mqttClient?.subscribe(topics, { qos: cfg.qos || 0 }, (err, granted) => {
-          if (err) {
-            console.error('[MQTT] ❌ Subscribe error:', err);
-          } else if (granted) {
-            console.log('[MQTT] ✅ Subscribed to topics:', granted.map((g: any) => g.topic).join(', '));
-          }
-        });
-      }
-    });
-
-    mqttClient.on('close', () => {
-      mqttStatus = 'disconnected';
-      console.log('[MQTT] Connection closed');
-    });
-
-    mqttClient.on('reconnect', () => {
-      mqttStatus = 'reconnecting';
-      console.log('[MQTT] Reconnecting...');
-    });
-
-    mqttClient.on('error', (err: any) => {
-      mqttStatus = 'error';
-      mqttConnecting = false;
-      
-      console.error('[MQTT] ❌ Backend client error:', {
-        message: err.message,
-        code: err.code
-      });
-
-      if (err.code === 5) {
-        console.error('[MQTT] 🔐 Authentication Error - Check credentials in database');
-      } else if (err.code === 4) {
-        console.error('[MQTT] ⚠️  Bad username or password');
-      }
-    });
-
-    mqttClient.on('message', async (topic, payload) => {
-      const message = safeParseJSON(payload);
-      if (!message) return;
-
-      switch (message.code) {
-        case 0:
-          await handleTagMessage(message.data);
-          break;
-        case 30:
-          await handleHeartbeat(message.data);
-          break;
-        default:
-          console.log('[MQTT] Ignored code:', message.code);
-      }
-    });
-
-    function safeParseJSON(payload: Buffer) {
-      try {
-        return JSON.parse(payload.toString());
-      } catch {
-        return null;
-      }
-    }
-
-  } catch (err) {
-    mqttConnecting = false;
-    console.error('[MQTT] ❌ connectMQTTWithConfig failed:', err);
+  if (typeof input === 'number') {
+    const d = new Date(input);
+    return isNaN(d.getTime()) ? null : d.toISOString();
   }
-}
-
-async function handleTagMessage(data: any) {
-  try {
-    const tag = normalizeRFIDPayload(data);
-    await saveTagData(tag);
-    const device = extractDeviceFromPayload(data);
-    await upsertReaderDevice(device);
-  } catch (err) {
-    console.error('[MQTT] handleTagMessage error:', err);
-  }
-}
-
-async function handleHeartbeat(data: any) {
-  try {
-    const device = extractDeviceFromPayload(data);
-    await upsertReaderDevice(device);
-  } catch (err) {
-    console.error('[MQTT] handleHeartbeat error:', err);
-  }
-}
-
-async function disconnectMQTT() {
-  try {
-    if (mqttClient) {
-      console.log('[MQTT] Disconnecting backend client');
-      mqttClient.removeAllListeners();
-      mqttClient.end(true);
-      mqttClient = null;
-      mqttStatus = 'disconnected';
+  if (typeof input === 'string') {
+    let s = input.trim();
+    // 'YYYY-MM-DD HH:MM:SS' -> 'YYYY-MM-DDTHH:MM:SSZ'
+    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) {
+      s = s.replace(' ', 'T') + 'Z';
+    } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s)) {
+      s = s + 'Z';
     }
-  } catch (err) {
-    console.error('[MQTT] Disconnect error:', err);
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? null : d.toISOString();
   }
+  return null;
 }
 
-async function reconnectMQTT(cfg: any) {
-  await disconnectMQTT();
-  await connectMQTTWithConfig(cfg);
-}
-
-function normalizeRFIDPayload(data: any) {
-  return {
-    epc: data.EPC ?? null,
-    tid: data.TID ?? null,
-    rssi: data.RSSI ?? null,
-    antenna: data.AntId ?? null,
-    reader_id: data.Device ?? null,
-    reader_name: data.Device ?? null,
-    read_time: data.ReadTime
-      ? new Date(data.ReadTime.replace(' ', 'T'))
-      : new Date(),
-    raw_payload: JSON.stringify(data)
-  };
-}
-
-function extractDeviceFromPayload(data: any) {
-  const now = new Date();
-  return {
-    id: data.Device ?? null,
-    name: data.Device ?? null,
-    type: 'reader',
-    status: 'online',
-    ip_address: data.IP ?? null,
-    mac_address: data.MAC ?? null,
-    signal_strength: typeof data.RSSI === 'number' ? data.RSSI : 100,
-    last_heartbeat: now,
-    discovered_by: 'mqtt',
-    first_seen: now,
-    tags_read_increment: 1
-  };
-}
-
-async function upsertReaderDevice(device: any) {
+// Save tag data to database
+async function saveTagData(data: any) {
   try {
-    if (!device || !device.id) return;
-    const sql = `
-      INSERT INTO devices
-        (id, name, type, status, ip_address, mac_address, signal_strength, last_heartbeat, tags_read_today, discovery_source, last_seen, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        status = 'online',
-        last_seen = NOW(),
-        discovery_source = 'auto',
-        signal_strength = VALUES(signal_strength),
-        last_heartbeat = VALUES(last_heartbeat),
-        ip_address = COALESCE(VALUES(ip_address), ip_address),
-        mac_address = COALESCE(VALUES(mac_address), mac_address),
-        tags_read_today = tags_read_today + VALUES(tags_read_today)
+    console.log('[DB] Attempting to save tag:', data.epc || data.tag_id);
+    // Prefer RFID timestamp fields from MQTT payload
+    const readTimeRaw = data.timestamp ?? data.read_time ?? data.readTime ?? new Date();
+    const readTime = getSafeReadTime(readTimeRaw);
+
+    const query = `
+      INSERT INTO rfid_tags (epc, tid, rssi, antenna, reader_id, reader_name, read_time, raw_payload, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
     `;
-    const params = [
-      device.id, device.name, device.type, device.status, device.ip_address, device.mac_address,
-      device.signal_strength, device.last_heartbeat, device.tags_read_increment || 1, device.discovered_by || 'mqtt', new Date(), new Date()
-    ];
-    await pool.execute(sql, params);
-  } catch (err) {
-    console.error('[Device] upsertReaderDevice error:', err);
+    await pool.execute(query, [
+      data.epc || data.tag_id,
+      data.tid || null,
+      data.rssi || null,
+      data.antenna || null,
+      data.reader_id || 'UNKNOWN',
+      data.reader_name || 'UNKNOWN',
+      readTime,
+      data.raw_payload || null
+    ]);
+    console.log('[DB] ✅ Tag saved successfully:', data.epc || data.tag_id);
+  } catch (error) {
+    console.error('[DB] Error saving tag data:', error);
   }
-}
-
-async function saveTagData(tag: any) {
-  const sql = `
-    INSERT INTO rfid_tags
-    (epc, tid, rssi, antenna, reader_id, reader_name, read_time, raw_payload)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `;
-
-  const values = [
-    tag.epc,
-    tag.tid,
-    tag.rssi,
-    tag.antenna,
-    tag.reader_id,
-    tag.reader_name,
-    tag.read_time,
-    tag.raw_payload
-  ];
-
-  await pool.execute(sql, values);
 }
 
 // Auth Middleware
@@ -446,690 +222,131 @@ function authenticateToken(req: Request, res: Response, next: NextFunction) {
 
 // Health Check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'healthy', read_time: new Date().toISOString() });
+  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
-// MQTT Status Route
-app.get('/api/settings/mqtt/status', authenticateToken, (req, res) => {
-  res.json({ success: true, data: { status: mqttStatus } });
-});
-
-// Get MQTT Configuration (for frontend to display in UI)
-app.get('/api/settings/mqtt', authenticateToken, async (req, res) => {
+// Database Debug Endpoint
+app.get('/api/debug/db-status', authenticateToken, async (req, res) => {
   try {
-    const [rows]: any = await pool.execute(
-      'SELECT * FROM mqtt_config WHERE enabled = 1 LIMIT 1'
-    );
+    const [[totalRecords]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags') as any;
+    const [[uniqueTags]] = await pool.execute('SELECT COUNT(DISTINCT epc) as count FROM rfid_tags') as any;
+    const [[latestRecord]] = await pool.execute('SELECT MAX(read_time) as latest FROM rfid_tags') as any;
+    const [[oldestRecord]] = await pool.execute('SELECT MIN(read_time) as oldest FROM rfid_tags') as any;
     
-    if (!rows || rows.length === 0) {
-      return res.json({ 
-        success: true, 
-        data: null,
-        message: 'No MQTT configuration found. Please configure in Settings.'
-      });
-    }
-
-    const cfg = rows[0];
-    let topics: string[] = [];
-
-    if (Array.isArray(cfg.topics)) {
-      topics = cfg.topics;
-    } else if (typeof cfg.topics === 'string') {
-      try {
-        topics = JSON.parse(cfg.topics);
-      } catch (e) {
-        console.error('[MQTT] Failed to parse topics JSON:', e);
-        topics = [];
+    res.json({
+      success: true,
+      data: {
+        totalRecords: totalRecords?.count || 0,
+        uniqueTags: uniqueTags?.count || 0,
+        latestRead: latestRecord?.latest,
+        oldestRead: oldestRecord?.oldest,
+        mqtt_status: mqttClient?.connected ? 'Connected' : 'Disconnected'
       }
-    }
+    });
+  } catch (error) {
+    console.error('[Debug] DB status error:', error);
+    res.status(500).json({ success: false, error: 'Failed to get DB status' });
+  }
+});
 
-    topics = topics.filter(Boolean);
-
-    // Don't send password to frontend for security
-    const safeCfg = {
-      broker: cfg.broker,
-      port: cfg.port,
-      protocol: cfg.protocol || 'mqtt',
-      username: cfg.username || '',
-      clientId: cfg.client_id || '',
-      topics: topics,
-      qos: cfg.qos ?? 0,
-      enabled: !!cfg.enabled,
-      hasPassword: !!cfg.password
+// Analytics Debug Endpoint - Check if data exists for different date ranges
+app.get('/api/debug/analytics-check', authenticateToken, async (req, res) => {
+  try {
+    const checks = {
+      total_records: 0,
+      last_24h: 0,
+      last_7d: 0,
+      last_30d: 0,
+      all_time: 0,
+      sample_data: null,
+      date_range: {},
+      daily_trends_query: null,
+      hourly_patterns_query: null,
+      weekly_trends_query: null
     };
 
-    console.log('[MQTT] Fetched config from DB:', {
-      ...safeCfg,
-      hasPassword: !!cfg.password
-    });
+    // Total records
+    const [[{ count: totalCount }]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags') as any;
+    checks.total_records = totalCount;
 
-    res.json({ success: true, data: safeCfg });
-  } catch (error) {
-    console.error('[Settings] Get MQTT config error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch MQTT config' });
-  }
-});
+    // Last 24 hours
+    const [[{ count: count24h }]] = await pool.execute(
+      'SELECT COUNT(*) as count FROM rfid_tags WHERE read_time >= DATE_SUB(NOW(), INTERVAL 24 HOUR)'
+    ) as any;
+    checks.last_24h = count24h;
 
-// Debug endpoint to see what's actually in database (Admin only)
-app.get('/api/settings/mqtt/debug', authenticateToken, async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ success: false, error: 'Admin access required' });
-    }
+    // Last 7 days
+    const [[{ count: count7d }]] = await pool.execute(
+      'SELECT COUNT(*) as count FROM rfid_tags WHERE read_time >= DATE_SUB(NOW(), INTERVAL 7 DAY)'
+    ) as any;
+    checks.last_7d = count7d;
 
-    const [allRows]: any = await pool.execute('SELECT * FROM mqtt_config');
-    
-    const debugData = allRows.map((row: any) => ({
-      id: row.id,
-      broker: row.broker,
-      port: row.port,
-      protocol: row.protocol,
-      username: row.username,
-      hasPassword: !!row.password,
-      passwordLength: row.password ? row.password.length : 0,
-      client_id: row.client_id,
-      topics: row.topics,
-      qos: row.qos,
-      enabled: row.enabled,
-      created_at: row.created_at,
-      updated_at: row.updated_at
-    }));
+    // Last 30 days
+    const [[{ count: count30d }]] = await pool.execute(
+      'SELECT COUNT(*) as count FROM rfid_tags WHERE read_time >= DATE_SUB(NOW(), INTERVAL 30 DAY)'
+    ) as any;
+    checks.last_30d = count30d;
 
-    res.json({ 
-      success: true, 
-      data: {
-        totalConfigs: allRows.length,
-        configs: debugData
-      }
-    });
-  } catch (error) {
-    console.error('[Settings] Debug MQTT config error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch debug data' });
-  }
-});
+    // Sample data
+    const [sampleData] = await pool.execute('SELECT * FROM rfid_tags ORDER BY read_time DESC LIMIT 3') as any;
+    checks.sample_data = sampleData;
 
-// Save MQTT Configuration from UI
-app.post('/api/settings/mqtt', authenticateToken, async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ success: false, error: 'Admin access required' });
-    }
+    // Date range in database
+    const [[dateRange]] = await pool.execute(
+      'SELECT MIN(DATE(read_time)) as min_date, MAX(DATE(read_time)) as max_date FROM rfid_tags'
+    ) as any;
+    checks.date_range = dateRange;
 
-    const {
-      broker,
-      port,
-      protocol,
-      username,
-      password,
-      client_id,
-      topics,
-      qos,
-      enabled
-    } = req.body;
+    // Test daily trends query
+    const [dailyTrends] = await pool.execute(`
+      SELECT 
+        DATE(read_time) as date,
+        COUNT(*) as reads,
+        COUNT(DISTINCT epc) as unique_tags
+      FROM rfid_tags
+      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      GROUP BY DATE(read_time)
+      ORDER BY date ASC
+      LIMIT 5
+    `) as any;
+    checks.daily_trends_query = dailyTrends;
 
-    // Validate required fields
-    if (!broker || !port) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Broker and port are required' 
-      });
-    }
+    // Test hourly patterns query
+    const [hourlyPatterns] = await pool.execute(`
+      SELECT 
+        HOUR(read_time) as hour,
+        COUNT(*) as count,
+        COUNT(DISTINCT epc) as unique_tags
+      FROM rfid_tags
+      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+      GROUP BY HOUR(read_time)
+      ORDER BY hour ASC
+      LIMIT 5
+    `) as any;
+    checks.hourly_patterns_query = hourlyPatterns;
 
-    const topicsJson = JSON.stringify(topics || []);
-    const clientIdValue = client_id ?? req.body.clientId ?? `rfid-backend-${Date.now()}`;
-
-    console.log('[MQTT] Saving configuration from UI:', {
-      broker,
-      port,
-      protocol,
-      username,
-      hasPassword: !!password,
-      clientId: clientIdValue,
-      topics,
-      qos,
-      enabled
-    });
-
-    // First, disable all existing configs
-    await pool.execute('UPDATE mqtt_config SET enabled = 0');
-
-    // Check if any config exists
-    const [existingRows]: any = await pool.execute(
-      'SELECT id FROM mqtt_config LIMIT 1'
-    );
-
-    if (existingRows.length > 0) {
-      // Update existing config
-      const updateSql = `
-        UPDATE mqtt_config
-        SET broker=?, port=?, protocol=?, username=?, password=?,
-            client_id=?, topics=?, qos=?, enabled=?, updated_at=NOW()
-        WHERE id=?
-      `;
-      await pool.execute(updateSql, [
-        broker, 
-        port, 
-        protocol || 'mqtt', 
-        username || null, 
-        password || null, 
-        clientIdValue, 
-        topicsJson, 
-        qos || 0, 
-        enabled ? 1 : 0, 
-        existingRows[0].id
-      ]);
-      console.log('[MQTT] ✅ Updated existing config in database (ID:', existingRows[0].id, ')');
-    } else {
-      // Insert new config
-      const insertSql = `
-        INSERT INTO mqtt_config
-        (broker, port, protocol, username, password, client_id, topics, qos, enabled)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `;
-      await pool.execute(insertSql, [
-        broker, 
-        port, 
-        protocol || 'mqtt', 
-        username || null, 
-        password || null, 
-        clientIdValue, 
-        topicsJson, 
-        qos || 0, 
-        enabled ? 1 : 0
-      ]);
-      console.log('[MQTT] ✅ Inserted new config into database');
-    }
-
-    // Verify the save by reading back
-    const [verifyRows]: any = await pool.execute(
-      'SELECT * FROM mqtt_config WHERE enabled = 1 LIMIT 1'
-    );
-    
-    if (verifyRows && verifyRows.length > 0) {
-      console.log('[MQTT] ✅ Verified saved config:', {
-        broker: verifyRows[0].broker,
-        port: verifyRows[0].port,
-        username: verifyRows[0].username,
-        hasPassword: !!verifyRows[0].password,
-        enabled: verifyRows[0].enabled
-      });
-    } else {
-      console.error('[MQTT] ❌ Failed to verify saved config!');
-    }
-
-    // Reconnect backend MQTT with new config
-    if (enabled) {
-      const newCfg = await loadMQTTConfigFromDB();
-      if (newCfg) {
-        console.log('[MQTT] Reconnecting backend with credentials:', {
-          broker: newCfg.broker,
-          port: newCfg.port,
-          username: newCfg.username,
-          hasPassword: !!newCfg.password
-        });
-        await reconnectMQTT(newCfg);
-        console.log('[MQTT] ✅ Backend reconnected with new configuration');
-      } else {
-        console.error('[MQTT] ❌ Failed to load config after save!');
-      }
-    } else {
-      await disconnectMQTT();
-      console.log('[MQTT] ⚠️  MQTT disabled, backend disconnected');
-    }
-
-    // Return saved config to frontend (without password)
-    res.json({ 
-      success: true, 
-      message: 'MQTT configuration saved successfully',
-      data: { 
-        broker,
-        port,
-        protocol: protocol || 'mqtt',
-        username,
-        clientId: clientIdValue,
-        topics,
-        qos: qos || 0,
-        enabled: !!enabled,
-        hasPassword: !!password
-      }
-    });
-  } catch (error: any) {
-    console.error('[Settings] Save MQTT config error:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to save MQTT config',
-      details: error.message 
-    });
-  }
-});
-
-// Test MQTT Connection (before saving)
-app.post('/api/settings/mqtt/test', authenticateToken, async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ success: false, error: 'Admin access required' });
-    }
-
-    const { broker, port, protocol, username, password, client_id } = req.body;
-
-    console.log('[MQTT Test] Testing connection:', {
-      broker,
-      port,
-      protocol,
-      username,
-      hasPassword: !!password,
-      clientId: client_id
-    });
-
-    const host = broker;
-    const portStr = port ? `:${port}` : '';
-    const proto = protocol || 'mqtt';
-    
-    let url: string;
-    if (proto === 'ws' || proto === 'wss') {
-      url = `${proto}://${host}${portStr}`;
-    } else if (proto === 'mqtts') {
-      url = `mqtts://${host}${portStr}`;
-    } else {
-      url = `mqtt://${host}${portStr}`;
-    }
-
-    const testClient = mqtt.connect(url, {
-      clientId: client_id || `test-${Date.now()}`,
-      username: username || undefined,
-      password: password || undefined,
-      clean: true,
-      connectTimeout: 10_000,
-      reconnectPeriod: 0
-    });
-
-    let responded = false;
-
-    testClient.on('connect', () => {
-      if (responded) return;
-      responded = true;
-      
-      console.log('[MQTT Test] ✅ Connection successful');
-      testClient.end();
-      res.json({ 
-        success: true, 
-        message: 'Connection successful',
-        data: { status: 'connected' }
-      });
-    });
-
-    testClient.on('error', (err: any) => {
-      if (responded) return;
-      responded = true;
-      
-      console.error('[MQTT Test] ❌ Connection failed:', err.message);
-      testClient.end();
-      
-      let errorMessage = 'Connection failed';
-      let suggestions: string[] = [];
-
-      if (err.code === 5 || err.message.includes('Not authorized')) {
-        errorMessage = 'Authentication failed - Not authorized';
-        suggestions = [
-          'Verify username and password are correct in EMQX',
-          'Check if user exists in EMQX Dashboard > Authentication',
-          'Verify user has permission to connect',
-          'Check EMQX ACL/permissions for this user'
-        ];
-      } else if (err.code === 4) {
-        errorMessage = 'Bad username or password';
-        suggestions = [
-          'Double-check username and password',
-          'Verify credentials in EMQX Dashboard'
-        ];
-      } else if (err.code === 'ECONNREFUSED') {
-        errorMessage = 'Connection refused - Broker not reachable';
-        suggestions = [
-          'Verify EMQX is running',
-          'Check broker address and port',
-          'Verify firewall settings'
-        ];
-      }
-
-      res.status(400).json({ 
-        success: false, 
-        error: errorMessage,
-        details: err.message,
-        suggestions
-      });
-    });
-
-    setTimeout(() => {
-      if (!responded) {
-        responded = true;
-        testClient.end();
-        res.status(408).json({ 
-          success: false, 
-          error: 'Connection timeout',
-          suggestions: [
-            'Broker may be unreachable',
-            'Check network connectivity'
-          ]
-        });
-      }
-    }, 12_000);
-
-  } catch (error: any) {
-    console.error('[MQTT Test] Error:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Test failed',
-      details: error.message 
-    });
-  }
-});
-
-// ============= SYSTEM CONFIGURATION API =============
-
-// Get System Configuration (Admin Only)
-app.get('/api/config', authenticateToken, async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ success: false, error: 'Admin access required' });
-    }
-
-    const [rows]: any = await pool.execute(
-      `SELECT config_key, config_value FROM system_config 
-       WHERE config_key IN ('db_connection_limit', 'mqtt_reconnect_period_ms', 
-       'mqtt_connect_timeout_ms', 'mqtt_keepalive_sec', 'jwt_expires_in', 
-       'data_retention_days', 'default_page_size', 'device_offline_check_interval_sec')`
-    );
-
-    const config: any = {
-      db_connection_limit: 10,
-      mqtt_reconnect_period_ms: 5000,
-      mqtt_connect_timeout_ms: 30000,
-      mqtt_keepalive_sec: 60,
-      jwt_expires_in: '24h',
-      data_retention_days: 30,
-      default_page_size: 20,
-      device_offline_check_interval_sec: 300
-    };
-
-    // Override with database values if they exist
-    rows.forEach((row: any) => {
-      const value = row.config_value;
-      if (value) {
-        // Try to parse as number
-        config[row.config_key] = isNaN(value) ? value : parseInt(value);
-      }
-    });
-
-    res.json({ success: true, data: config });
-  } catch (error) {
-    console.error('[Config] GET error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch config' });
-  }
-});
-
-// Update System Configuration (Admin Only)
-app.put('/api/config', authenticateToken, async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ success: false, error: 'Admin access required' });
-    }
-
-    const config = req.body;
-    const allowedKeys = [
-      'db_connection_limit',
-      'mqtt_reconnect_period_ms',
-      'mqtt_connect_timeout_ms',
-      'mqtt_keepalive_sec',
-      'jwt_expires_in',
-      'data_retention_days',
-      'default_page_size',
-      'device_offline_check_interval_sec'
-    ];
-
-    // Update each config value
-    for (const [key, value] of Object.entries(config)) {
-      if (!allowedKeys.includes(key)) continue;
-
-      await pool.execute(
-        `INSERT INTO system_config (config_key, config_value, updated_at)
-         VALUES (?, ?, NOW())
-         ON DUPLICATE KEY UPDATE
-         config_value = VALUES(config_value),
-         updated_at = NOW()`,
-        [key, String(value)]
-      );
-    }
-
-    console.log('[Config] Updated system configuration:', config);
+    // Test weekly trends query
+    const [weeklyTrends] = await pool.execute(`
+      SELECT 
+        WEEK(read_time) as week,
+        YEAR(read_time) as year,
+        COUNT(*) as reads,
+        COUNT(DISTINCT epc) as unique_tags
+      FROM rfid_tags
+      WHERE read_time >= DATE_SUB(NOW(), INTERVAL 12 WEEK)
+      GROUP BY YEAR(read_time), WEEK(read_time)
+      ORDER BY year DESC, week DESC
+      LIMIT 5
+    `) as any;
+    checks.weekly_trends_query = weeklyTrends;
 
     res.json({
       success: true,
-      message: 'System configuration updated successfully',
-      data: config
+      data: checks
     });
   } catch (error) {
-    console.error('[Config] PUT error:', error);
-    res.status(500).json({ success: false, error: 'Failed to update config' });
-  }
-});
-
-// ============= USER PREFERENCES API =============
-
-// Get User Preferences
-app.get('/api/user/preferences', authenticateToken, async (req, res) => {
-  try {
-    const userId = req.user.userId;
-
-    const [rows]: any = await pool.execute(
-      `SELECT * FROM user_preferences WHERE user_id = ?`,
-      [userId]
-    );
-
-    if (rows.length === 0) {
-      // Return defaults if not found
-      return res.json({ 
-        success: true, 
-        data: {
-          theme: 'light',
-          default_page_size: 20,
-          auto_refresh_enabled: true,
-          auto_refresh_interval_sec: 30,
-          default_map_zoom: 1,
-          desktop_notifications: true
-        }
-      });
-    }
-
-    const prefs = rows[0];
-    res.json({
-      success: true,
-      data: {
-        theme: prefs.theme || 'light',
-        default_page_size: prefs.default_page_size || 20,
-        auto_refresh_enabled: !!prefs.auto_refresh_enabled,
-        auto_refresh_interval_sec: prefs.auto_refresh_interval_sec || 30,
-        default_map_zoom: parseFloat(prefs.default_map_zoom) || 1,
-        desktop_notifications: !!prefs.desktop_notifications
-      }
-    });
-  } catch (error) {
-    console.error('[Preferences] GET error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch preferences' });
-  }
-});
-
-// Update User Preferences
-app.put('/api/user/preferences', authenticateToken, async (req, res) => {
-  try {
-    const userId = req.user.userId;
-    const {
-      theme,
-      default_page_size,
-      auto_refresh_enabled,
-      auto_refresh_interval_sec,
-      default_map_zoom,
-      desktop_notifications
-    } = req.body;
-
-    // Check if record exists
-    const [existing]: any = await pool.execute(
-      `SELECT id FROM user_preferences WHERE user_id = ?`,
-      [userId]
-    );
-
-    if (existing.length > 0) {
-      // Update existing
-      await pool.execute(
-        `UPDATE user_preferences
-         SET theme = ?, default_page_size = ?, auto_refresh_enabled = ?,
-             auto_refresh_interval_sec = ?, default_map_zoom = ?,
-             desktop_notifications = ?, updated_at = NOW()
-         WHERE user_id = ?`,
-        [
-          theme || 'light',
-          default_page_size || 20,
-          auto_refresh_enabled ? 1 : 0,
-          auto_refresh_interval_sec || 30,
-          default_map_zoom || 1,
-          desktop_notifications ? 1 : 0,
-          userId
-        ]
-      );
-    } else {
-      // Insert new
-      await pool.execute(
-        `INSERT INTO user_preferences 
-         (user_id, theme, default_page_size, auto_refresh_enabled,
-          auto_refresh_interval_sec, default_map_zoom, desktop_notifications)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [
-          userId,
-          theme || 'light',
-          default_page_size || 20,
-          auto_refresh_enabled ? 1 : 0,
-          auto_refresh_interval_sec || 30,
-          default_map_zoom || 1,
-          desktop_notifications ? 1 : 0
-        ]
-      );
-    }
-
-    console.log('[Preferences] Updated for user:', userId);
-
-    res.json({
-      success: true,
-      message: 'Preferences updated successfully',
-      data: {
-        theme,
-        default_page_size,
-        auto_refresh_enabled,
-        auto_refresh_interval_sec,
-        default_map_zoom,
-        desktop_notifications
-      }
-    });
-  } catch (error) {
-    console.error('[Preferences] PUT error:', error);
-    res.status(500).json({ success: false, error: 'Failed to update preferences' });
-  }
-});
-
-// ============= DASHBOARD SETTINGS API =============
-
-// Get Dashboard Settings
-app.get('/api/settings/dashboard', authenticateToken, async (req, res) => {
-  try {
-    const [rows]: any = await pool.execute(
-      `SELECT * FROM dashboard_settings LIMIT 1`
-    );
-
-    if (rows.length === 0) {
-      // Return defaults
-      return res.json({
-        success: true,
-        data: {
-          tag_dedupe_window_minutes: 5,
-          device_offline_minutes: 5,
-          auto_refresh_interval_seconds: 30
-        }
-      });
-    }
-
-    const settings = rows[0];
-    res.json({
-      success: true,
-      data: {
-        tag_dedupe_window_minutes: settings.tag_dedupe_window_minutes || 5,
-        device_offline_minutes: settings.device_offline_minutes || 5,
-        auto_refresh_interval_seconds: settings.auto_refresh_interval_seconds || 30
-      }
-    });
-  } catch (error) {
-    console.error('[Dashboard Settings] GET error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch dashboard settings' });
-  }
-});
-
-// Update Dashboard Settings
-app.put('/api/settings/dashboard', authenticateToken, async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ success: false, error: 'Admin access required' });
-    }
-
-    const {
-      tag_dedupe_window_minutes,
-      device_offline_minutes,
-      auto_refresh_interval_seconds
-    } = req.body;
-
-    // Check if settings exist
-    const [existing]: any = await pool.execute(
-      `SELECT id FROM dashboard_settings LIMIT 1`
-    );
-
-    if (existing.length > 0) {
-      // Update existing
-      await pool.execute(
-        `UPDATE dashboard_settings
-         SET tag_dedupe_window_minutes = ?,
-             device_offline_minutes = ?,
-             auto_refresh_interval_seconds = ?,
-             updated_at = NOW()`,
-        [
-          tag_dedupe_window_minutes || 5,
-          device_offline_minutes || 5,
-          auto_refresh_interval_seconds || 30
-        ]
-      );
-    } else {
-      // Insert new
-      await pool.execute(
-        `INSERT INTO dashboard_settings
-         (tag_dedupe_window_minutes, device_offline_minutes, auto_refresh_interval_seconds)
-         VALUES (?, ?, ?)`,
-        [
-          tag_dedupe_window_minutes || 5,
-          device_offline_minutes || 5,
-          auto_refresh_interval_seconds || 30
-        ]
-      );
-    }
-
-    console.log('[Dashboard Settings] Updated');
-
-    res.json({
-      success: true,
-      message: 'Dashboard settings updated successfully',
-      data: {
-        tag_dedupe_window_minutes,
-        device_offline_minutes,
-        auto_refresh_interval_seconds
-      }
-    });
-  } catch (error) {
-    console.error('[Dashboard Settings] PUT error:', error);
-    res.status(500).json({ success: false, error: 'Failed to update dashboard settings' });
+    console.error('[Debug] Analytics check error:', error);
+    res.status(500).json({ success: false, error: 'Failed to check analytics', details: (error as any).message });
   }
 });
 
@@ -1143,8 +360,6 @@ app.post('/api/auth/login', async (req, res) => {
       [username]
     );
 
-    const sysConfig = await ConfigManager.loadSystemConfig(pool);
-    
     if (users.length === 0) {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
@@ -1156,17 +371,9 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
-    let expiresIn: string | number = '24h';
-    if (sysConfig.jwt_expires_in) {
-      expiresIn = typeof sysConfig.jwt_expires_in === 'number' 
-        ? sysConfig.jwt_expires_in 
-        : String(sysConfig.jwt_expires_in);
-    }
-    
-    const secret: string = process.env.JWT_SECRET || 'your-secret-key';
     const token = jwt.sign(
       { userId: user.id, username: user.username, role: user.role },
-      secret,
+      process.env.JWT_SECRET || 'your-secret-key',
       { expiresIn: '24h' }
     );
 
@@ -1196,45 +403,193 @@ app.post('/api/auth/login', async (req, res) => {
 // Get Tags
 app.get('/api/tags', authenticateToken, async (req, res) => {
   try {
-    const sysConfig = await ConfigManager.loadSystemConfig(pool);
-    const { page = 1, limit = 100, startDate, endDate, readerId } = req.query;
-    
-    let query = 'SELECT * FROM rfid_tags WHERE 1=1';
-    const params: any[] = [];
+    // Extract parameters with strict type checking
+    let page = 1;
+    let limit = 100;
+    let startDate: any = null;
+    let endDate: any = null;
+    let readerId: any = null;
+
+    // Parse page parameter
+    if (req.query.page) {
+      const pageStr = Array.isArray(req.query.page) ? req.query.page[0] : req.query.page;
+      const parsed = parseInt(pageStr as string, 10);
+      if (!isNaN(parsed) && parsed > 0) {
+        page = parsed;
+      }
+    }
+
+    // Parse limit parameter
+    if (req.query.limit) {
+      const limitStr = Array.isArray(req.query.limit) ? req.query.limit[0] : req.query.limit;
+      const parsed = parseInt(limitStr as string, 10);
+      if (!isNaN(parsed) && parsed > 0) {
+        limit = Math.min(parsed, 1000); // Cap at 1000
+      }
+    }
+
+    // Parse optional filters
+    if (req.query.startDate) {
+      startDate = Array.isArray(req.query.startDate) ? req.query.startDate[0] : req.query.startDate;
+    }
+    if (req.query.endDate) {
+      endDate = Array.isArray(req.query.endDate) ? req.query.endDate[0] : req.query.endDate;
+    }
+    if (req.query.readerId) {
+      readerId = Array.isArray(req.query.readerId) ? req.query.readerId[0] : req.query.readerId;
+    }
+
+    // Build where clause and params array
+    const params: Array<string | number> = [];
+    let whereClause = 'WHERE 1=1';
 
     if (startDate) {
-      query += ' AND read_time >= ?';
+      whereClause += ' AND read_time >= ?';
       params.push(startDate);
     }
     if (endDate) {
-      query += ' AND read_time <= ?';
+      whereClause += ' AND read_time <= ?';
       params.push(endDate);
     }
     if (readerId) {
-      query += ' AND reader_id = ?';
+      whereClause += ' AND reader_id = ?';
       params.push(readerId);
     }
 
-    const pageNum = parseInt(page as string) || 1;
-    const limitNum = parseInt(limit as string) || sysConfig.default_page_size;  // ✅ FROM CONFIG
-    const offset = (pageNum - 1) * limitNum;
+    // Calculate offset
+    const offset = (page - 1) * limit;
 
-    query += ` ORDER BY read_time DESC LIMIT ${limitNum} OFFSET ${offset}`;
-    const [tags] = await pool.execute(query, params);
+    // Build query with embedded LIMIT/OFFSET (not placeholders)
+    const query = `SELECT * FROM rfid_tags ${whereClause} ORDER BY read_time DESC LIMIT ${limit} OFFSET ${offset}`;
+
+    console.log('[Tags] Final Query:', query);
+    console.log('[Tags] WHERE Params:', params);
+
+    const [tags] = await pool.execute(query, params) as any;
     const [[{ total }]] = await pool.execute('SELECT COUNT(*) as total FROM rfid_tags') as any;
+
+    // Normalize timestamp field for frontend: convert DB local datetime to ISO
+    const normalized = (tags || []).map((t: any) => {
+      const out = { ...t };
+      if (t.read_time) {
+        // MySQL driver may return Date objects or strings
+        if (t.read_time instanceof Date) {
+          out.timestamp = (t.read_time as Date).toISOString();
+        } else if (typeof t.read_time === 'string') {
+          const iso = localDatetimeToISOString(t.read_time);
+          out.timestamp = iso || null;
+        } else {
+          out.timestamp = null;
+        }
+      } else if (t.readTime) {
+        try {
+          out.timestamp = new Date(t.readTime).toISOString();
+        } catch {
+          out.timestamp = null;
+        }
+      } else {
+        out.timestamp = null;
+      }
+      return out;
+    });
 
     res.json({
       success: true,
       data: {
-        tags,
+        tags: normalized,
         total,
-        page: parseInt(page as string),
-        totalPages: Math.ceil(total / parseInt(limit as string))
+        page,
+        totalPages: Math.ceil(total / limit)
       }
     });
   } catch (error) {
     console.error('[Tags] Error:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch tags' });
+  }
+});
+
+// Save Tags (POST)
+app.post('/api/tags', authenticateToken, async (req, res) => {
+  try {
+    let tagsToSave = Array.isArray(req.body) ? req.body : [req.body];
+    
+    // Unwrap nested tags structure if present: { tags: [...] }
+    if (tagsToSave.length === 1 && tagsToSave[0]?.tags && Array.isArray(tagsToSave[0].tags)) {
+      console.log('[Tags] Detected nested tags structure, unwrapping...');
+      tagsToSave = tagsToSave[0].tags;
+    }
+    
+    console.log('[Tags] Received POST request to save', tagsToSave.length, 'tag(s)');
+    console.log('[Tags] Raw request body:', JSON.stringify(tagsToSave, null, 2));
+    
+    const results = [];
+    
+    for (const tag of tagsToSave) {
+      try {
+        // Log raw incoming tag
+        console.log('[Tags] Raw incoming tag:', JSON.stringify(tag, null, 2));
+        
+        // Sanitize all parameters - convert undefined to null
+        const epc = tag.epc || tag.tag_id || tag.tagId || tag.EPCValue || tag.EPC || null;
+        const tid = tag.tid ?? tag.TID ?? null;
+        const rssi = tag.rssi ?? tag.RSSI ?? tag.signalStrength ?? null;
+        const antenna = tag.antenna ?? tag.Antenna ?? tag.antennaNumber ?? null;
+        const readerId = tag.reader_id ?? tag.readerId ?? tag.readerID ?? 'UNKNOWN';
+        const readerName = tag.reader_name ?? tag.readerName ?? tag.deviceName ?? 'UNKNOWN';
+        const rawPayload = tag.raw_payload ?? tag.rawPayload ?? tag.payload ?? null;
+        
+        // Format datetime for MySQL - convert ISO format to MySQL datetime format
+        //const readTimeRaw = tag.read_time ?? tag.readTime ?? tag.timestamp ?? new Date();
+        //const readTime = formatDateTimeForMySQL(readTimeRaw);
+        
+        // Prefer the RFID-provided `timestamp` when present (frontend/reader),
+        // fall back to other fields or server time. Produce both a UTC ISO
+        // timestamp for the frontend and a UTC MySQL DATETIME string for DB.
+        const readTimeRaw = tag.timestamp ?? tag.read_time ?? tag.readTime ?? new Date();
+        const timestampISO = normalizeToISOStringUTC(readTimeRaw) || new Date().toISOString();
+        const readTime = getSafeReadTime(readTimeRaw); // MySQL DATETIME (UTC)
+        console.log('[Tags] Sanitized tag data:', { epc, tid, rssi, antenna, readerId, readerName, readTime, timestampISO });
+        
+        // Skip if epc is still null - this is required
+        if (!epc) {
+          console.warn('[Tags] ⚠️  Skipping tag with null epc. Full tag data:', tag);
+          results.push({ epc: null, success: false, error: 'EPC/Tag ID is required' });
+          continue;
+        }
+        
+        const query = `
+          INSERT INTO rfid_tags (epc, tid, rssi, antenna, reader_id, reader_name, read_time, raw_payload, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        `;
+        
+        await pool.execute(query, [
+          epc,
+          tid,
+          rssi,
+          antenna,
+          readerId,
+          readerName,
+          readTime,
+          rawPayload
+        ]);
+        
+        results.push({ epc, success: true });
+        console.log('[Tags] ✅ Tag saved:', epc);
+      } catch (error) {
+        console.error('[Tags] Error saving individual tag:', error);
+        results.push({ epc: tag.epc || tag.tag_id, success: false, error: (error as any).message });
+      }
+    }
+    
+    const successCount = results.filter(r => r.success).length;
+    res.json({
+      success: successCount > 0,
+      data: results,
+      message: `Saved ${successCount}/${tagsToSave.length} tags`
+    });
+  } catch (error) {
+    console.error('[Tags] POST Error:', error);
+    res.status(500).json({ success: false, error: 'Failed to save tags' });
   }
 });
 
@@ -1280,7 +635,7 @@ app.get('/api/dashboard/activity', authenticateToken, async (req, res) => {
         DATE_FORMAT(read_time, '%H:00') as time,
         COUNT(*) as count
       FROM rfid_tags
-      WHERE read_time >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+      WHERE read_time >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)
       GROUP BY DATE_FORMAT(read_time, '%H:00')
       ORDER BY time
     `);
@@ -1316,27 +671,7 @@ app.get('/api/dashboard/tags-by-device', authenticateToken, async (req, res) => 
 // Get Devices
 app.get('/api/devices', authenticateToken, async (req, res) => {
   try {
-    const [rows]: any = await pool.execute('SELECT * FROM devices ORDER BY name');
-
-    const devices = (rows || []).map((r: any) => ({
-      id: r.id,
-      name: r.name,
-      type: r.type,
-      status: r.status,
-      ipAddress: r.ip_address || null,
-      macAddress: r.mac_address || null,
-      location: r.location || null,
-      zone: r.zone || null,
-      signalStrength: typeof r.signal_strength === 'number' ? r.signal_strength : (r.signal_strength ? Number(r.signal_strength) : 0),
-      lastHeartbeat: r.last_heartbeat ? new Date(r.last_heartbeat).toISOString() : null,
-      lastSeen: r.last_seen ? new Date(r.last_seen).toISOString() : null,
-      discoverySource: r.discovery_source || 'manual',
-      coordinates: (r.coordinates_x !== null && r.coordinates_y !== null) ? { x: Number(r.coordinates_x), y: Number(r.coordinates_y) } : undefined,
-      tagsReadToday: typeof r.tags_read_today === 'number' ? r.tags_read_today : (r.tags_read_today ? Number(r.tags_read_today) : 0),
-      uptime: r.uptime || null,
-      createdAt: r.created_at ? new Date(r.created_at).toISOString() : null
-    }));
-
+    const [devices] = await pool.execute('SELECT * FROM devices ORDER BY name');
     res.json({ success: true, data: devices });
   } catch (error) {
     console.error('[Devices] Error:', error);
@@ -1456,36 +791,367 @@ app.delete('/api/users/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// ============================================
-// SERVER STARTUP
-// ============================================
+// ============= ANALYTICS ENDPOINTS =============
 
-// Initialize server on startup
-async function startServer() {
+// Get Weekly Trends
+app.get('/api/analytics/weekly-trends', authenticateToken, async (req, res) => {
   try {
-    // Ensure database schema and tables exist
-    await ensureSchema();
-    console.log('[DB] Schema ensured');
+    const [rows] = await pool.execute(`
+      SELECT 
+        WEEK(read_time) as week,
+        YEAR(read_time) as year,
+        COUNT(*) as \`reads\`,
+        COUNT(DISTINCT epc) as unique_tags,
+        AVG(rssi) as avg_rssi
+      FROM rfid_tags
+      WHERE read_time >= DATE_SUB(NOW(), INTERVAL 12 WEEK)
+      GROUP BY YEAR(read_time), WEEK(read_time)
+      ORDER BY year DESC, week DESC
+    `);
 
-    // Load dashboard settings from database
-    await loadDashboardSettingsFromDB();
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('[Analytics] Weekly trends error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch weekly trends' });
+  }
+});
 
-    // Load MQTT configuration and connect if enabled
-    const mqttConfig = await loadMQTTConfigFromDB();
-    if (mqttConfig && mqttConfig.enabled) {
-      await connectMQTTWithConfig(mqttConfig);
-    }
+// Get Antenna Stats
+app.get('/api/analytics/antenna-stats', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(`
+      SELECT 
+        reader_name as device,
+        antenna as antenna,
+        COUNT(*) as read_count,
+        COUNT(DISTINCT epc) as unique_tags,
+        AVG(rssi) as avg_rssi,
+        MAX(read_time) as last_read
+      FROM rfid_tags
+      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+      GROUP BY reader_name, antenna
+      ORDER BY reader_name, antenna
+    `);
 
-    // Start HTTP server
-    app.listen(PORT, () => {
-      console.log(`[Server] ✅ Server listening on port ${PORT}`);
-      console.log(`[Server] API available at http://localhost:${PORT}`);
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('[Analytics] Antenna stats error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch antenna stats' });
+  }
+});
+
+// Get Hourly Patterns
+app.get('/api/analytics/hourly-patterns', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(`
+      SELECT 
+        HOUR(read_time) as hour,
+        COUNT(*) as count,
+        COUNT(DISTINCT epc) as unique_tags,
+        AVG(rssi) as avg_rssi
+      FROM rfid_tags
+      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+      GROUP BY HOUR(read_time)
+      ORDER BY hour ASC
+    `);
+
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('[Analytics] Hourly patterns error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch hourly patterns' });
+  }
+});
+
+// Get Assets by Location
+app.get('/api/analytics/assets-by-location', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(`
+      SELECT 
+        reader_name as location,
+        COUNT(*) as total_reads,
+        COUNT(DISTINCT epc) as unique_tags,
+        AVG(rssi) as avg_rssi,
+        MAX(read_time) as last_read
+      FROM rfid_tags
+      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      GROUP BY reader_name
+      ORDER BY total_reads DESC
+    `);
+
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('[Analytics] Assets by location error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch assets by location' });
+  }
+});
+
+// Get Top Tags
+app.get('/api/analytics/top-tags', authenticateToken, async (req, res) => {
+  try {
+    const daysParam = Array.isArray(req.query.days) ? req.query.days[0] : req.query.days;
+    const limitParam = Array.isArray(req.query.limit) ? req.query.limit[0] : req.query.limit;
+    
+    const days = Math.max(1, Math.min(365, parseInt(daysParam as string) || 30));
+    const limit = Math.max(1, Math.min(1000, parseInt(limitParam as string) || 10));
+
+    const [rows] = await pool.execute(`
+      SELECT 
+        epc as tag_id,
+        COUNT(*) as read_count,
+        COUNT(DISTINCT reader_name) as device_count,
+        AVG(rssi) as avg_rssi,
+        MAX(read_time) as last_seen
+      FROM rfid_tags
+      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL ${days} DAY)
+      GROUP BY epc
+      ORDER BY read_count DESC
+      LIMIT ${limit}
+    `);
+
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('[Analytics] Top tags error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch top tags' });
+  }
+});
+
+// Get Device Performance
+app.get('/api/analytics/device-performance', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(`
+      SELECT 
+        reader_name as device,
+        reader_id as device_id,
+        COUNT(*) as total_reads,
+        COUNT(DISTINCT epc) as unique_tags,
+        COUNT(DISTINCT DATE(read_time)) as active_days,
+        AVG(rssi) as avg_signal,
+        MAX(rssi) as best_signal,
+        MIN(rssi) as worst_signal,
+        MAX(read_time) as last_active
+      FROM rfid_tags
+      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      GROUP BY reader_id, reader_name
+      ORDER BY total_reads DESC
+    `);
+
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('[Analytics] Device performance error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch device performance' });
+  }
+});
+
+// Get Daily Trends
+app.get('/api/analytics/daily-trends', authenticateToken, async (req, res) => {
+  try {
+    const daysParam = Array.isArray(req.query.days) ? req.query.days[0] : req.query.days;
+    const days = Math.max(1, Math.min(365, parseInt(daysParam as string) || 30));
+
+    const [rows] = await pool.execute(`
+      SELECT 
+        DATE(read_time) as date,
+        COUNT(*) as \`reads\`,
+        COUNT(DISTINCT epc) as unique_tags,
+        COUNT(DISTINCT reader_name) as active_devices,
+        AVG(rssi) as avg_rssi
+      FROM rfid_tags
+      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL ${days} DAY)
+      GROUP BY DATE(read_time)
+      ORDER BY date ASC
+    `);
+
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('[Analytics] Daily trends error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch daily trends' });
+  }
+});
+
+// ============= SETTINGS & CONFIG ENDPOINTS =============
+
+// Get Yesterday's Statistics
+app.get('/api/dashboard/stats-yesterday', authenticateToken, async (req, res) => {
+  try {
+    const [[yesterdayStats]] = await pool.execute(`
+      SELECT 
+        COUNT(*) as totalTags,
+        COUNT(DISTINCT epc) as uniqueTags
+      FROM rfid_tags
+      WHERE DATE(read_time) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+    `) as any;
+
+    const [[activeReaders]] = await pool.execute(
+      'SELECT COUNT(*) as count FROM devices WHERE status = "online" AND DATE(last_seen) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)'
+    ) as any;
+
+    res.json({
+      success: true,
+      data: {
+        totalTags: yesterdayStats?.totalTags || 0,
+        uniqueTags: yesterdayStats?.uniqueTags || 0,
+        activeReaders: activeReaders?.count || 0
+      }
     });
   } catch (error) {
-    console.error('[Server] Startup error:', error);
-    process.exit(1);
+    console.error('[Dashboard] Yesterday stats error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch yesterday stats' });
   }
-}
+});
 
-// Start the server
-startServer();
+// Get Dashboard Settings
+app.get('/api/settings/dashboard', authenticateToken, async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      data: {
+        tag_dedupe_window_minutes: 5,
+        device_offline_minutes: 5,
+        auto_refresh_interval_seconds: 30
+      }
+    });
+  } catch (error) {
+    console.error('[Settings] Dashboard settings error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch dashboard settings' });
+  }
+});
+
+// Update Dashboard Settings
+app.put('/api/settings/dashboard', authenticateToken, async (req, res) => {
+  try {
+    const { tag_dedupe_window_minutes, device_offline_minutes, auto_refresh_interval_seconds } = req.body;
+    
+    // In a real app, you'd save these to a settings table
+    console.log('[Settings] Updating dashboard settings:', {
+      tag_dedupe_window_minutes,
+      device_offline_minutes,
+      auto_refresh_interval_seconds
+    });
+
+    res.json({
+      success: true,
+      data: {
+        tag_dedupe_window_minutes,
+        device_offline_minutes,
+        auto_refresh_interval_seconds
+      }
+    });
+  } catch (error) {
+    console.error('[Settings] Update dashboard settings error:', error);
+    res.status(500).json({ success: false, error: 'Failed to update dashboard settings' });
+  }
+});
+
+// Get System Configuration (Admin only)
+app.get('/api/config', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        db_connection_limit: 10,
+        db_queue_limit: 0,
+        mqtt_reconnect_period_ms: 1000,
+        mqtt_connect_timeout_ms: 30000,
+        mqtt_keepalive_sec: 60,
+        mqtt_clean_session: true,
+        jwt_expires_in: '24h',
+        session_timeout_minutes: 1440,
+        data_retention_days: 90,
+        cleanup_interval_hours: 24,
+        default_page_size: 100,
+        max_page_size: 1000,
+        device_offline_check_interval_sec: 300,
+        stats_cache_duration_sec: 60,
+        log_level: 'info'
+      }
+    });
+  } catch (error) {
+    console.error('[Config] Get system config error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch system config' });
+  }
+});
+
+// Update System Configuration (Admin only)
+app.put('/api/config', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const config = req.body;
+    
+    // In a real app, you'd save these to a config table or environment
+    console.log('[Config] Updating system config:', config);
+
+    res.json({
+      success: true,
+      data: config
+    });
+  } catch (error) {
+    console.error('[Config] Update system config error:', error);
+    res.status(500).json({ success: false, error: 'Failed to update system config' });
+  }
+});
+
+// Get User Preferences
+app.get('/api/user/preferences', authenticateToken, async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      data: {
+        theme: 'dark',
+        default_page_size: 100,
+        auto_refresh_enabled: true,
+        auto_refresh_interval_sec: 30,
+        default_map_zoom: 12,
+        desktop_notifications: true
+      }
+    });
+  } catch (error) {
+    console.error('[Preferences] Get user preferences error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch user preferences' });
+  }
+});
+
+// Update User Preferences
+app.put('/api/user/preferences', authenticateToken, async (req, res) => {
+  try {
+    const preferences = req.body;
+    
+    // In a real app, you'd save these to a user_preferences table
+    console.log('[Preferences] Updating user preferences:', preferences);
+
+    res.json({
+      success: true,
+      data: preferences
+    });
+  } catch (error) {
+    console.error('[Preferences] Update user preferences error:', error);
+    res.status(500).json({ success: false, error: 'Failed to update user preferences' });
+  }
+});
+
+// Error Handler
+app.use((err: any, req: any, res: any, next: any) => {
+  console.error('[Server] Error:', err);
+  res.status(500).json({ success: false, error: 'Internal server error' });
+});
+
+// Start Server
+app.listen(PORT, () => {
+  console.log(`[Server] Running on port ${PORT}`);
+  console.log(`[Server] Environment: ${process.env.NODE_ENV || 'development'}`);
+  connectMQTT();
+});
+
+// Graceful Shutdown
+process.on('SIGTERM', () => {
+  console.log('[Server] SIGTERM received, closing gracefully');
+  mqttClient?.end();
+  pool.end();
+  process.exit(0);
+});

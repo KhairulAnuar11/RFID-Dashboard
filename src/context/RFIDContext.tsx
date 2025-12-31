@@ -10,6 +10,11 @@ interface RFIDContextType {
   tags: RFIDTag[];
   devices: Device[];
   stats: DashboardStats;
+  statsTrends: {
+    tagsToday: { value: number; isPositive: boolean };
+    uniqueTags: { value: number; isPositive: boolean };
+    activeReaders: { value: number; isPositive: boolean };
+  };
   config: SystemConfig;
   isConnected: boolean;
   connectionStatus: 'connected' | 'disconnected' | 'reconnecting' | 'error';
@@ -52,6 +57,11 @@ export const RFIDProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     activeReaders: 0,
     uniqueTags: 0,
     errorCount: 0
+  });
+  const [statsTrends, setStatsTrends] = useState({
+    tagsToday: { value: 0, isPositive: true },
+    uniqueTags: { value: 0, isPositive: true },
+    activeReaders: { value: 0, isPositive: true }
   });
   const [config, setConfig] = useState<SystemConfig>(() => {
     // Try to load config from localStorage
@@ -97,10 +107,18 @@ export const RFIDProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     };
   }, []);
 
-  // Update stats when tags or devices change
+  // Update stats periodically and on component mount
   useEffect(() => {
+    // Update stats immediately
     updateDashboardStats();
-  }, [tags, devices]);
+    
+    // Update stats every 30 seconds
+    const interval = setInterval(() => {
+      updateDashboardStats();
+    }, 30000);
+
+    return () => clearInterval(interval);
+  }, []);
 
   const loadInitialData = async () => {
     try {
@@ -132,26 +150,76 @@ export const RFIDProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   };
 
-  const updateDashboardStats = () => {
-    const today = new Date().toDateString();
-    const todayTags = tags.filter(t => new Date(t.timestamp).toDateString() === today);
-    const uniqueTagIds = new Set(tags.map(t => t.tagId));
-    const activeDeviceCount = devices.filter(d => d.status === 'online').length;
+  const updateDashboardStats = async () => {
+    try {
+      // Fetch today's stats from backend API
+      const statsResponse = await apiService.getDashboardStats();
+      if (statsResponse.success && statsResponse.data) {
+        setStats({
+          totalTagsToday: statsResponse.data.totalTagsToday || 0,
+          activeReaders: statsResponse.data.activeReaders || 0,
+          uniqueTags: statsResponse.data.uniqueTags || 0,
+          errorCount: statsResponse.data.errorCount || 0
+        });
 
-    setStats({
-      totalTagsToday: todayTags.length,
-      activeReaders: activeDeviceCount,
-      uniqueTags: uniqueTagIds.size,
-      errorCount: devices.filter(d => d.status === 'offline').length
-    });
+        // Fetch yesterday's stats for trend calculation
+        try {
+          const yesterdayResponse = await apiService.getYesterdayStats();
+          if (yesterdayResponse.success && yesterdayResponse.data) {
+            const yesterday = yesterdayResponse.data;
+            const today = statsResponse.data;
+
+            // Calculate percentage changes
+            const tagsChangePercent = yesterday.totalTags > 0
+              ? ((today.totalTagsToday - yesterday.totalTags) / yesterday.totalTags) * 100
+              : (today.totalTagsToday > 0 ? 100 : 0);
+
+            const uniqueChangePercent = yesterday.uniqueTags > 0
+              ? ((today.uniqueTags - yesterday.uniqueTags) / yesterday.uniqueTags) * 100
+              : (today.uniqueTags > 0 ? 100 : 0);
+
+            const readersChangePercent = yesterday.activeReaders > 0
+              ? ((today.activeReaders - yesterday.activeReaders) / yesterday.activeReaders) * 100
+              : (today.activeReaders > 0 ? 100 : 0);
+
+            setStatsTrends({
+              tagsToday: {
+                value: Math.round(tagsChangePercent * 10) / 10, // Round to 1 decimal
+                isPositive: tagsChangePercent >= 0
+              },
+              uniqueTags: {
+                value: Math.round(uniqueChangePercent * 10) / 10,
+                isPositive: uniqueChangePercent >= 0
+              },
+              activeReaders: {
+                value: Math.round(readersChangePercent * 10) / 10,
+                isPositive: readersChangePercent >= 0
+              }
+            });
+          }
+        } catch (trendError) {
+          console.warn('[RFID] Failed to calculate trends:', trendError);
+        }
+      }
+    } catch (error) {
+      console.error('[RFID] Failed to update stats:', error);
+    }
   };
 
-  const addTag = (tag: RFIDTag) => {
-    setTags(prev => {
-      const newTags = [tag, ...prev];
-      // Keep last 1000 tags in memory
-      return newTags.slice(0, 1000);
-    });
+  const addTag = async (tag: RFIDTag) => {
+    try {
+      // Add to local state
+      setTags(prev => {
+        const newTags = [tag, ...prev];
+        // Keep last 1000 tags in memory
+        return newTags.slice(0, 1000);
+      });
+
+      // Also save to backend database
+      await apiService.saveTags([tag]);
+    } catch (error) {
+      console.error('[RFID] Failed to save tag to backend:', error);
+    }
   };
 
   const updateDevice = async (device: Device) => {
@@ -223,8 +291,8 @@ export const RFIDProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       mqttService.subscribe(config.mqttConfig.topics);
       
       // Setup message handler
-      mqttService.onMessage((tag: RFIDTag) => {
-        addTag(tag);
+      mqttService.onMessage(async (tag: RFIDTag) => {
+        await addTag(tag);
       });
 
       setIsConnected(true);
@@ -258,6 +326,7 @@ export const RFIDProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         tags,
         devices,
         stats,
+        statsTrends,
         config,
         dashboardSettings,
         isConnected,

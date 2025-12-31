@@ -25,6 +25,8 @@ export interface RFIDTag {
   readerId: string;
   readerName: string;
   timestamp: string;
+  readTime?: string;
+  read_time?: string;
   antenna: number;
   count: number;
 }
