@@ -45,26 +45,62 @@ export const DashboardPage: React.FC = () => {
       return fullDay;
     };
 
-  const loadChartData = async () => {
-    try {
-      const [activityResponse, deviceResponse] = await Promise.all([
-        apiService.getTagActivity('24h'),
-        apiService.getTagsByDevice()
-      ]);
+    const loadChartData = async () => {
+      try {
+        const [activityResponse, deviceResponse] = await Promise.all([
+          apiService.getTagActivity('24h'),
+          apiService.getTagsByDevice()
+        ]);
 
-      if (activityResponse.success && activityResponse.data) {
-        setActivityData(normalize24HourData(activityResponse.data));
+        if (activityResponse.success && activityResponse.data) {
+          // The backend already returns normalized 24-hour data
+          // This data represents the CURRENT rolling 24-hour window
+          setActivityData(activityResponse.data);
+        }
 
+        if (deviceResponse.success && deviceResponse.data) {
+          setDeviceData(deviceResponse.data);
+        }
+      } catch (error) {
+        console.error('[Dashboard] Failed to load chart data:', error);
       }
+    };
 
-      if (deviceResponse.success && deviceResponse.data) {
-        setDeviceData(deviceResponse.data);
-      }
-    } catch (error) {
-      console.error('[Dashboard] Failed to load chart data:', error);
-    }
-  };
+    // Also update the auto-refresh useEffect to refresh more frequently
+    useEffect(() => {
+      loadChartData();
+      
+      // Refresh every 30 seconds to show real-time data
+      const interval = setInterval(() => {
+        loadChartData();
+      }, 30000); // 30 seconds
 
+      return () => clearInterval(interval);
+    }, []);
+
+    // Add a function to check if we need to reset (new day detection)
+    useEffect(() => {
+      const checkForNewDay = () => {
+        const lastRefreshDate = localStorage.getItem('lastDashboardRefresh');
+        const currentDate = new Date().toISOString().split('T')[0];
+        
+        if (lastRefreshDate !== currentDate) {
+          // New day detected - force refresh
+          console.log('[Dashboard] New day detected - refreshing data');
+          loadChartData();
+          localStorage.setItem('lastDashboardRefresh', currentDate);
+        }
+      };
+      
+      // Check every minute if it's a new day
+      const dayCheckInterval = setInterval(checkForNewDay, 60000);
+      
+      // Initial check
+      checkForNewDay();
+      
+      return () => clearInterval(dayCheckInterval);
+    }, []);
+    
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
