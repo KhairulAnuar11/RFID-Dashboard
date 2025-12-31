@@ -50,10 +50,29 @@ function connectMQTT() {
     mqttClient.on('message', async (topic, payload) => {
         try {
             console.log('[MQTT] Received message on topic:', topic);
-            console.log('[MQTT] Raw payload:', payload.toString());
-            const data = JSON.parse(payload.toString());
-            console.log('[MQTT] Parsed data:', JSON.stringify(data, null, 2));
-            await saveTagData(data);
+            const raw = payload.toString();
+            let data = null;
+            try {
+                data = JSON.parse(raw);
+            }
+            catch (e) {
+                // If payload is not JSON, pass raw string through
+                data = raw;
+            }
+            // If payload contains an envelope with tags array, save each tag individually
+            if (data && typeof data === 'object' && Array.isArray(data.tags)) {
+                for (const t of data.tags) {
+                    await saveTagData(t, raw);
+                }
+            }
+            else if (data && typeof data === 'object' && Array.isArray(data.data)) {
+                for (const t of data.data) {
+                    await saveTagData(t, raw);
+                }
+            }
+            else {
+                await saveTagData(data, raw);
+            }
         }
         catch (error) {
             console.error('[MQTT] Error processing message:', error);
@@ -87,17 +106,7 @@ function getSafeReadTime(input) {
             parsedDate = input;
     }
     const now = new Date();
-    const finalDate = parsedDate || now;
-    // Guard: if incoming date is obviously in the future (more than 1 day ahead)
-    // or has a year far from current, treat as server 'now' to avoid reader clock errors
-    const maxFutureMs = 24 * 60 * 60 * 1000; // 1 day
-    if (finalDate.getTime() - now.getTime() > maxFutureMs) {
-        // use server UTC now
-        parsedDate = now;
-    }
-    else if (finalDate.getUTCFullYear() > now.getUTCFullYear() + 1) {
-        parsedDate = now;
-    }
+    // Do not overwrite parsed reader timestamps — prefer reader-provided time when parseable.
     const useDate = parsedDate || now;
     // Format to MySQL DATETIME (YYYY-MM-DD HH:MM:SS) using UTC components
     const year = useDate.getUTCFullYear();
@@ -128,6 +137,16 @@ function localDatetimeToISOString(localStr) {
         return null;
     }
 }
+// Format Date -> MySQL DATETIME string in UTC: 'YYYY-MM-DD HH:MM:SS'
+function formatDateToMySQLUTC(d) {
+    const year = d.getUTCFullYear();
+    const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    const hours = String(d.getUTCHours()).padStart(2, '0');
+    const minutes = String(d.getUTCMinutes()).padStart(2, '0');
+    const seconds = String(d.getUTCSeconds()).padStart(2, '0');
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+}
 // Normalize arbitrary input into an ISO UTC string. This is used when
 // returning timestamps to the frontend so `new Date(...)` parsing is reliable.
 function normalizeToISOStringUTC(input) {
@@ -157,27 +176,75 @@ function normalizeToISOStringUTC(input) {
     return null;
 }
 // Save tag data to database
-async function saveTagData(data) {
+async function saveTagData(data, rawPayload) {
     try {
-        console.log('[DB] Attempting to save tag:', data.epc || data.tag_id);
-        // Prefer RFID timestamp fields from MQTT payload
-        const readTimeRaw = data.timestamp ?? data.read_time ?? data.readTime ?? new Date();
+        console.log('[DB] Attempting to save tag');
+        if (!data) {
+            // Nothing to save
+            return;
+        }
+        // If the data is a raw string (non-JSON), store it as rawPayload and skip
+        if (typeof data === 'string') {
+            const queryRaw = `
+      INSERT INTO rfid_tags (epc, tid, rssi, antenna, reader_id, reader_name, read_time, raw_payload, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())
+    `;
+            await pool.execute(queryRaw, [null, null, null, null, 'UNKNOWN', 'UNKNOWN', getSafeReadTime(new Date()), rawPayload || data]);
+            console.log('[DB] ✅ Raw string payload saved');
+            return;
+        }
+        // Prefer RFID timestamp fields from MQTT payload (do NOT use ISO `timestamp`).
+        // Accept multiple payload shapes / casings commonly emitted by readers: ReadTime, readTime, read_time, timestamp, Timestamp
+        const readTimeCandidates = [
+            data.read_time,
+            data.readTime,
+            data.ReadTime,
+            data.timestamp,
+            data.Timestamp,
+            data.time,
+            (data.data && (data.data.readTime ?? data.data.ReadTime ?? data.data.read_time ?? data.data.timestamp ?? data.data.Timestamp))
+        ];
+        const readTimeRaw = readTimeCandidates.find(v => v !== undefined && v !== null) ?? new Date();
         const readTime = getSafeReadTime(readTimeRaw);
+        // Normalize common tag fields with multiple possible payload shapes (EPC/TID/RSSI etc.)
+        const epcVal = data.epc || data.tag_id || data.EPC || (data.data && (data.data.EPC || data.data.epc)) || null;
+        const tidVal = data.tid || data.TID || (data.data && (data.data.TID || data.data.tid)) || null;
+        const rssiVal = data.rssi ?? data.RSSI ?? (data.data && (data.data.RSSI ?? data.data.rssi)) ?? null;
+        const antennaVal = data.antenna ?? data.AntId ?? data.antId ?? (data.data && (data.data.AntId ?? data.data.antId ?? data.data.antenna)) ?? null;
+        const readerIdVal = data.reader_id || data.readerId || data.reader || data.Device || (data.data && (data.data.Device || data.data.reader_id || data.data.readerId)) || 'UNKNOWN';
+        const readerNameVal = data.reader_name || data.readerName || data.Device || (data.data && (data.data.Device || data.data.reader_name)) || 'UNKNOWN';
         const query = `
       INSERT INTO rfid_tags (epc, tid, rssi, antenna, reader_id, reader_name, read_time, raw_payload, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
+        // Safely stringify payload for raw storage; prefer provided rawPayload string (unparsed)
+        let rawToStore = null;
+        if (rawPayload && typeof rawPayload === 'string')
+            rawToStore = rawPayload;
+        else if (data.raw_payload && typeof data.raw_payload === 'string')
+            rawToStore = data.raw_payload;
+        else {
+            try {
+                rawToStore = JSON.stringify(data);
+            }
+            catch (e) {
+                rawToStore = null;
+            }
+        }
+        // created_at: prefer readTime (reader-provided) else current UTC
+        const createdAtVal = readTime || formatDateToMySQLUTC(new Date());
         await pool.execute(query, [
-            data.epc || data.tag_id,
-            data.tid || null,
-            data.rssi || null,
-            data.antenna || null,
-            data.reader_id || 'UNKNOWN',
-            data.reader_name || 'UNKNOWN',
+            epcVal,
+            tidVal,
+            rssiVal,
+            antennaVal,
+            readerIdVal,
+            readerNameVal,
             readTime,
-            data.raw_payload || null
+            rawToStore,
+            createdAtVal
         ]);
-        console.log('[DB] ✅ Tag saved successfully:', data.epc || data.tag_id);
+        console.log('[DB] ✅ Tag saved successfully');
     }
     catch (error) {
         console.error('[DB] Error saving tag data:', error);
@@ -245,13 +312,13 @@ app.get('/api/debug/analytics-check', authenticateToken, async (req, res) => {
         const [[{ count: totalCount }]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags');
         checks.total_records = totalCount;
         // Last 24 hours
-        const [[{ count: count24h }]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE read_time >= DATE_SUB(NOW(), INTERVAL 24 HOUR)');
+        const [[{ count: count24h }]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE read_time >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)');
         checks.last_24h = count24h;
         // Last 7 days
-        const [[{ count: count7d }]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE read_time >= DATE_SUB(NOW(), INTERVAL 7 DAY)');
+        const [[{ count: count7d }]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE read_time >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 7 DAY)');
         checks.last_7d = count7d;
         // Last 30 days
-        const [[{ count: count30d }]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE read_time >= DATE_SUB(NOW(), INTERVAL 30 DAY)');
+        const [[{ count: count30d }]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE read_time >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY)');
         checks.last_30d = count30d;
         // Sample data
         const [sampleData] = await pool.execute('SELECT * FROM rfid_tags ORDER BY read_time DESC LIMIT 3');
@@ -266,7 +333,7 @@ app.get('/api/debug/analytics-check', authenticateToken, async (req, res) => {
         COUNT(*) as reads,
         COUNT(DISTINCT epc) as unique_tags
       FROM rfid_tags
-      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      WHERE DATE(read_time) >= DATE_SUB(UTC_DATE(), INTERVAL 30 DAY)
       GROUP BY DATE(read_time)
       ORDER BY date ASC
       LIMIT 5
@@ -279,7 +346,7 @@ app.get('/api/debug/analytics-check', authenticateToken, async (req, res) => {
         COUNT(*) as count,
         COUNT(DISTINCT epc) as unique_tags
       FROM rfid_tags
-      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+      WHERE DATE(read_time) >= DATE_SUB(UTC_DATE(), INTERVAL 7 DAY)
       GROUP BY HOUR(read_time)
       ORDER BY hour ASC
       LIMIT 5
@@ -293,7 +360,7 @@ app.get('/api/debug/analytics-check', authenticateToken, async (req, res) => {
         COUNT(*) as reads,
         COUNT(DISTINCT epc) as unique_tags
       FROM rfid_tags
-      WHERE read_time >= DATE_SUB(NOW(), INTERVAL 12 WEEK)
+      WHERE read_time >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 12 WEEK)
       GROUP BY YEAR(read_time), WEEK(read_time)
       ORDER BY year DESC, week DESC
       LIMIT 5
@@ -323,7 +390,7 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(401).json({ success: false, message: 'Invalid credentials' });
         }
         const token = jsonwebtoken_1.default.sign({ userId: user.id, username: user.username, role: user.role }, process.env.JWT_SECRET || 'your-secret-key', { expiresIn: '24h' });
-        await pool.execute('UPDATE users SET last_login = NOW() WHERE id = ?', [user.id]);
+        await pool.execute('UPDATE users SET last_login = UTC_TIMESTAMP() WHERE id = ?', [user.id]);
         res.json({
             success: true,
             data: {
@@ -400,32 +467,34 @@ app.get('/api/tags', authenticateToken, async (req, res) => {
         console.log('[Tags] WHERE Params:', params);
         const [tags] = await pool.execute(query, params);
         const [[{ total }]] = await pool.execute('SELECT COUNT(*) as total FROM rfid_tags');
-        // Normalize timestamp field for frontend: convert DB local datetime to ISO
+        // Normalize timestamp field for frontend: ensure `read_time` is a UTC
+        // 'YYYY-MM-DD HH:MM:SS' string only. Remove ISO/timestamp fields.
         const normalized = (tags || []).map((t) => {
             const out = { ...t };
             if (t.read_time) {
-                // MySQL driver may return Date objects or strings
                 if (t.read_time instanceof Date) {
-                    out.timestamp = t.read_time.toISOString();
+                    out.read_time = formatDateToMySQLUTC(t.read_time);
                 }
                 else if (typeof t.read_time === 'string') {
-                    const iso = localDatetimeToISOString(t.read_time);
-                    out.timestamp = iso || null;
+                    // assume DB string already in UTC MySQL DATETIME format
+                    out.read_time = t.read_time;
                 }
                 else {
-                    out.timestamp = null;
+                    out.read_time = null;
                 }
             }
             else if (t.readTime) {
-                try {
-                    out.timestamp = new Date(t.readTime).toISOString();
+                // If other field present, try to normalize it into MySQL UTC format
+                const iso = localDatetimeToISOString(t.readTime);
+                if (iso) {
+                    out.read_time = iso.replace('T', ' ').slice(0, 19);
                 }
-                catch {
-                    out.timestamp = null;
+                else {
+                    out.read_time = null;
                 }
             }
             else {
-                out.timestamp = null;
+                out.read_time = null;
             }
             return out;
         });
@@ -450,16 +519,12 @@ app.post('/api/tags', authenticateToken, async (req, res) => {
         let tagsToSave = Array.isArray(req.body) ? req.body : [req.body];
         // Unwrap nested tags structure if present: { tags: [...] }
         if (tagsToSave.length === 1 && tagsToSave[0]?.tags && Array.isArray(tagsToSave[0].tags)) {
-            console.log('[Tags] Detected nested tags structure, unwrapping...');
             tagsToSave = tagsToSave[0].tags;
         }
         console.log('[Tags] Received POST request to save', tagsToSave.length, 'tag(s)');
-        console.log('[Tags] Raw request body:', JSON.stringify(tagsToSave, null, 2));
         const results = [];
         for (const tag of tagsToSave) {
             try {
-                // Log raw incoming tag
-                console.log('[Tags] Raw incoming tag:', JSON.stringify(tag, null, 2));
                 // Sanitize all parameters - convert undefined to null
                 const epc = tag.epc || tag.tag_id || tag.tagId || tag.EPCValue || tag.EPC || null;
                 const tid = tag.tid ?? tag.TID ?? null;
@@ -471,13 +536,10 @@ app.post('/api/tags', authenticateToken, async (req, res) => {
                 // Format datetime for MySQL - convert ISO format to MySQL datetime format
                 //const readTimeRaw = tag.read_time ?? tag.readTime ?? tag.timestamp ?? new Date();
                 //const readTime = formatDateTimeForMySQL(readTimeRaw);
-                // Prefer the RFID-provided `timestamp` when present (frontend/reader),
-                // fall back to other fields or server time. Produce both a UTC ISO
-                // timestamp for the frontend and a UTC MySQL DATETIME string for DB.
-                const readTimeRaw = tag.timestamp ?? tag.read_time ?? tag.readTime ?? new Date();
-                const timestampISO = normalizeToISOStringUTC(readTimeRaw) || new Date().toISOString();
+                // Prefer the RFID-provided `read_time` / `readTime` (do NOT use ISO `timestamp`)
+                // fall back to server time when missing.
+                const readTimeRaw = tag.read_time ?? tag.readTime ?? new Date();
                 const readTime = getSafeReadTime(readTimeRaw); // MySQL DATETIME (UTC)
-                console.log('[Tags] Sanitized tag data:', { epc, tid, rssi, antenna, readerId, readerName, readTime, timestampISO });
                 // Skip if epc is still null - this is required
                 if (!epc) {
                     console.warn('[Tags] ⚠️  Skipping tag with null epc. Full tag data:', tag);
@@ -486,8 +548,9 @@ app.post('/api/tags', authenticateToken, async (req, res) => {
                 }
                 const query = `
           INSERT INTO rfid_tags (epc, tid, rssi, antenna, reader_id, reader_name, read_time, raw_payload, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
+                const createdAt = readTime || formatDateToMySQLUTC(new Date());
                 await pool.execute(query, [
                     epc,
                     tid,
@@ -496,13 +559,14 @@ app.post('/api/tags', authenticateToken, async (req, res) => {
                     readerId,
                     readerName,
                     readTime,
-                    rawPayload
+                    rawPayload,
+                    createdAt
                 ]);
                 results.push({ epc, success: true });
-                console.log('[Tags] ✅ Tag saved:', epc);
+                console.log('[Tags] ✅ Tag saved');
             }
             catch (error) {
-                console.error('[Tags] Error saving individual tag:', error);
+                console.error('[Tags] Error saving individual tag:', error.message || error);
                 results.push({ epc: tag.epc || tag.tag_id, success: false, error: error.message });
             }
         }
@@ -521,7 +585,7 @@ app.post('/api/tags', authenticateToken, async (req, res) => {
 // Get Dashboard Stats
 app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
     try {
-        const [[tagsToday]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE DATE(read_time) = CURDATE()');
+        const [[tagsToday]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE DATE(read_time) = UTC_DATE()');
         const [[activeReaders]] = await pool.execute('SELECT COUNT(*) as count FROM devices WHERE status = "online"');
         const [[uniqueTags]] = await pool.execute('SELECT COUNT(DISTINCT epc) as count FROM rfid_tags');
         const [[offlineDevices]] = await pool.execute('SELECT COUNT(*) as count FROM devices WHERE status = "offline"');
@@ -552,7 +616,14 @@ app.get('/api/dashboard/activity', authenticateToken, async (req, res) => {
       GROUP BY DATE_FORMAT(read_time, '%H:00')
       ORDER BY time
     `);
-        res.json({ success: true, data: rows });
+        // Ensure all 24 hourly buckets are present (fill missing hours with zero)
+        const rowsArr = (rows || []);
+        const fullDay = Array.from({ length: 24 }, (_, hour) => {
+            const label = String(hour).padStart(2, '0') + ':00';
+            const found = rowsArr.find(r => String(r.time) === label);
+            return { time: label, count: found ? Number(found.count) : 0 };
+        });
+        res.json({ success: true, data: fullDay });
     }
     catch (error) {
         console.error('[Dashboard] Activity error:', error);
@@ -567,7 +638,7 @@ app.get('/api/dashboard/tags-by-device', authenticateToken, async (req, res) => 
         reader_name as device,
         COUNT(*) as count
       FROM rfid_tags
-      WHERE DATE(read_time) = CURDATE()
+      WHERE DATE(read_time) = UTC_DATE()
       GROUP BY reader_name
       ORDER BY count DESC
       LIMIT 10
@@ -693,7 +764,7 @@ app.get('/api/analytics/weekly-trends', authenticateToken, async (req, res) => {
         COUNT(DISTINCT epc) as unique_tags,
         AVG(rssi) as avg_rssi
       FROM rfid_tags
-      WHERE read_time >= DATE_SUB(NOW(), INTERVAL 12 WEEK)
+      WHERE read_time >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 12 WEEK)
       GROUP BY YEAR(read_time), WEEK(read_time)
       ORDER BY year DESC, week DESC
     `);
@@ -716,7 +787,7 @@ app.get('/api/analytics/antenna-stats', authenticateToken, async (req, res) => {
         AVG(rssi) as avg_rssi,
         MAX(read_time) as last_read
       FROM rfid_tags
-      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+      WHERE DATE(read_time) >= DATE_SUB(UTC_DATE(), INTERVAL 7 DAY)
       GROUP BY reader_name, antenna
       ORDER BY reader_name, antenna
     `);
@@ -732,16 +803,25 @@ app.get('/api/analytics/hourly-patterns', authenticateToken, async (req, res) =>
     try {
         const [rows] = await pool.execute(`
       SELECT 
-        HOUR(read_time) as hour,
-        COUNT(*) as count,
-        COUNT(DISTINCT epc) as unique_tags,
-        AVG(rssi) as avg_rssi
+        DATE_FORMAT(read_time, '%H:00') as hour,
+        COUNT(*) as read_count,
+        COUNT(DISTINCT reader_name) as device_count
       FROM rfid_tags
-      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
-      GROUP BY HOUR(read_time)
+      WHERE read_time >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)
+      GROUP BY DATE_FORMAT(read_time, '%H:00')
       ORDER BY hour ASC
     `);
-        res.json({ success: true, data: rows });
+        const rowsArr = (rows || []);
+        const fullDay = Array.from({ length: 24 }, (_, hour) => {
+            const label = String(hour).padStart(2, '0') + ':00';
+            const found = rowsArr.find(r => String(r.hour) === label);
+            return {
+                hour: label,
+                read_count: found ? Number(found.read_count) : 0,
+                device_count: found ? Number(found.device_count) : 0
+            };
+        });
+        res.json({ success: true, data: fullDay });
     }
     catch (error) {
         console.error('[Analytics] Hourly patterns error:', error);
@@ -759,7 +839,7 @@ app.get('/api/analytics/assets-by-location', authenticateToken, async (req, res)
         AVG(rssi) as avg_rssi,
         MAX(read_time) as last_read
       FROM rfid_tags
-      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      WHERE DATE(read_time) >= DATE_SUB(UTC_DATE(), INTERVAL 30 DAY)
       GROUP BY reader_name
       ORDER BY total_reads DESC
     `);
@@ -785,7 +865,7 @@ app.get('/api/analytics/top-tags', authenticateToken, async (req, res) => {
         AVG(rssi) as avg_rssi,
         MAX(read_time) as last_seen
       FROM rfid_tags
-      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL ${days} DAY)
+      WHERE DATE(read_time) >= DATE_SUB(UTC_DATE(), INTERVAL ${days} DAY)
       GROUP BY epc
       ORDER BY read_count DESC
       LIMIT ${limit}
@@ -812,7 +892,7 @@ app.get('/api/analytics/device-performance', authenticateToken, async (req, res)
         MIN(rssi) as worst_signal,
         MAX(read_time) as last_active
       FROM rfid_tags
-      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      WHERE DATE(read_time) >= DATE_SUB(UTC_DATE(), INTERVAL 30 DAY)
       GROUP BY reader_id, reader_name
       ORDER BY total_reads DESC
     `);
@@ -836,7 +916,7 @@ app.get('/api/analytics/daily-trends', authenticateToken, async (req, res) => {
         COUNT(DISTINCT reader_name) as active_devices,
         AVG(rssi) as avg_rssi
       FROM rfid_tags
-      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL ${days} DAY)
+      WHERE DATE(read_time) >= DATE_SUB(UTC_DATE(), INTERVAL ${days} DAY)
       GROUP BY DATE(read_time)
       ORDER BY date ASC
     `);
@@ -856,9 +936,9 @@ app.get('/api/dashboard/stats-yesterday', authenticateToken, async (req, res) =>
         COUNT(*) as totalTags,
         COUNT(DISTINCT epc) as uniqueTags
       FROM rfid_tags
-      WHERE DATE(read_time) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+      WHERE DATE(read_time) = DATE_SUB(UTC_DATE(), INTERVAL 1 DAY)
     `);
-        const [[activeReaders]] = await pool.execute('SELECT COUNT(*) as count FROM devices WHERE status = "online" AND DATE(last_seen) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)');
+        const [[activeReaders]] = await pool.execute('SELECT COUNT(*) as count FROM devices WHERE status = "online" AND DATE(last_seen) = DATE_SUB(UTC_DATE(), INTERVAL 1 DAY)');
         res.json({
             success: true,
             data: {

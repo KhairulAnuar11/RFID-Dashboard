@@ -272,7 +272,7 @@ export const DashboardPage: React.FC = () => {
                   <div className="text-right">
                     <p className="text-sm text-gray-700">{tag.readerName}</p>
                     <p className="text-xs text-gray-500">
-                      {formatUTCTime(tag.timestamp ?? tag.readTime ?? tag.read_time)} | RSSI: {tag.rssi}dBm | Ant: {tag.antenna}
+                      {formatUTCTime(tag.readTime ?? tag.read_time)} | RSSI: {tag.rssi}dBm | Ant: {tag.antenna}
                     </p>
                   </div>
                 </motion.div>

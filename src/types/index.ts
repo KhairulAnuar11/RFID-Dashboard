@@ -24,8 +24,8 @@ export interface RFIDTag {
   rssi: number;
   readerId: string;
   readerName: string;
-  timestamp: string;
-  readTime?: string;
+  // Standardized UTC read time in 'YYYY-MM-DD HH:MM:SS' (UTC)
+  readTime: string;
   read_time?: string;
   antenna: number;
   count: number;

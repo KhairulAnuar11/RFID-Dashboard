@@ -37,12 +37,14 @@ export const TagsPage: React.FC = () => {
       if (filters.readerId && tag.readerId !== filters.readerId) {
         return false;
       }
-      if (filters.startDate && new Date(tag.timestamp) < new Date(filters.startDate)) {
-        return false;
-      }
-      if (filters.endDate && new Date(tag.timestamp) > new Date(filters.endDate)) {
-        return false;
-      }
+        if (filters.startDate) {
+          const tagDate = tag.readTime ? new Date((tag.readTime as string).replace(' ', 'T') + 'Z') : null;
+          if (!tagDate || tagDate < new Date(filters.startDate)) return false;
+        }
+        if (filters.endDate) {
+          const tagDate = tag.readTime ? new Date((tag.readTime as string).replace(' ', 'T') + 'Z') : null;
+          if (!tagDate || tagDate > new Date(filters.endDate)) return false;
+        }
 
       return true;
     });
@@ -75,13 +77,28 @@ export const TagsPage: React.FC = () => {
     { key: 'antenna', label: 'Antenna' },
     { key: 'count', label: 'Read Count' },
     { 
-      key: 'timestamp', 
+      key: 'readTime', 
       label: 'Timestamp',
-      render: (value: string) => (
-        <span className="text-xs">
-          {new Date(value).toLocaleString()}
-        </span>
-      )
+      render: (value: string) => {
+        if (!value) return <span className="text-xs">''</span>;
+        // Parse the time portion from the tag's readTime (assumed UTC)
+        const parsed = new Date(value.replace(' ', 'T') + 'Z');
+        if (isNaN(parsed.getTime())) return <span className="text-xs">{value}</span>;
+
+        // Use current UTC date but keep the tag's time (hours/minutes/seconds)
+        const now = new Date();
+        const year = now.getUTCFullYear();
+        const month = now.getUTCMonth();
+        const day = now.getUTCDate();
+
+        const combined = new Date(Date.UTC(year, month, day, parsed.getUTCHours(), parsed.getUTCMinutes(), parsed.getUTCSeconds()));
+
+        return (
+          <span className="text-xs">
+            {combined.toLocaleString([], { timeZone: 'UTC' })}
+          </span>
+        );
+      }
     }
   ];
 
@@ -128,7 +145,7 @@ export const TagsPage: React.FC = () => {
           <ExportButton 
             data={filteredTags}
             filename="rfid-tags"
-            columns={['tagId', 'epc', 'readerName', 'rssi', 'antenna', 'count', 'timestamp']}
+            columns={['tagId', 'epc', 'readerName', 'rssi', 'antenna', 'count', 'readTime']}
           />
         </div>
 

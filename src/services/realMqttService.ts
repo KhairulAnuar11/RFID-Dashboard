@@ -262,31 +262,54 @@ class RealMQTTService {
 
       const d = payload.data;
 
-      // Normalize ReadTime to ISO UTC reliably (treat "YYYY-MM-DD HH:MM:SS" as UTC)
-      const normalizeReadTime = (s: any) => {
+      // Normalize ReadTime into UTC MySQL DATETIME string 'YYYY-MM-DD HH:MM:SS'
+      const normalizeToMySQLUTC = (s: any) => {
         if (!s) return null;
-        if (s instanceof Date) return isNaN(s.getTime()) ? null : s.toISOString();
+        if (s instanceof Date) {
+          const dObj = s as Date;
+          if (isNaN(dObj.getTime())) return null;
+          const y = dObj.getUTCFullYear();
+          const m = String(dObj.getUTCMonth() + 1).padStart(2, '0');
+          const dd = String(dObj.getUTCDate()).padStart(2, '0');
+          const hh = String(dObj.getUTCHours()).padStart(2, '0');
+          const min = String(dObj.getUTCMinutes()).padStart(2, '0');
+          const ss = String(dObj.getUTCSeconds()).padStart(2, '0');
+          return `${y}-${m}-${dd} ${hh}:${min}:${ss}`;
+        }
         let str = String(s).trim();
+        // Treat 'YYYY-MM-DD HH:MM:SS' as UTC
         if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(str)) {
-          str = str.replace(' ', 'T') + 'Z';
-        } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(str)) {
+          // already MySQL-like UTC string
+          return str;
+        }
+        // If ISO without timezone, assume UTC
+        if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(str)) {
           str = str + 'Z';
         }
         const dObj = new Date(str);
-        return isNaN(dObj.getTime()) ? null : dObj.toISOString();
+        if (isNaN(dObj.getTime())) return null;
+        const y = dObj.getUTCFullYear();
+        const m = String(dObj.getUTCMonth() + 1).padStart(2, '0');
+        const dd = String(dObj.getUTCDate()).padStart(2, '0');
+        const hh = String(dObj.getUTCHours()).padStart(2, '0');
+        const min = String(dObj.getUTCMinutes()).padStart(2, '0');
+        const ss = String(dObj.getUTCSeconds()).padStart(2, '0');
+        return `${y}-${m}-${dd} ${hh}:${min}:${ss}`;
       };
 
-      const timestampISO = normalizeReadTime(d.ReadTime) || new Date().toISOString();
+      // Normalize ReadTime to UTC MySQL DATETIME string. If missing, use current UTC now.
+      const readTime = normalizeToMySQLUTC(d.ReadTime) || normalizeToMySQLUTC(new Date()) || new Date().toISOString().split('T')[0] + ' ' + new Date().toISOString().split('T')[1].split('.')[0];
 
       const tag: RFIDTag = {
-        id: `${d.EPC}-${timestampISO}`,
+        id: `${d.EPC}-${readTime}`,
         tagId: d.TID || '',
         epc: d.EPC,
         rssi: d.RSSI,
         readerId: d.Device,
         readerName: d.Device,
         antenna: Number(d.AntId) || 1,
-        timestamp: timestampISO,
+        // use readTime in MySQL UTC format (no ISO) per requirements
+        readTime,
         count: 1
       };
 
