@@ -5,6 +5,8 @@ import { Header } from '../components/layout/Header';
 import { apiService } from '../services/apiService';
 import { motion } from 'motion/react';
 import { toast } from 'sonner';
+import { io } from 'socket.io-client';
+
 
 interface AnalyticsData {
   weeklyTrends: any[];
@@ -28,8 +30,64 @@ export const AnalyticsPage: React.FC = () => {
     devicePerformance: [],
     dailyTrends: []
   });
+
   const [loading, setLoading] = useState(true);
   
+  const create24HourBuckets = () => {
+  const now = new Date();
+  return Array.from({ length: 24 }, (_, i) => {
+    const hour = new Date(now);
+    hour.setHours(now.getHours() - (23 - i), 0, 0, 0);
+    return {
+      hour: hour.getHours().toString().padStart(2, '0') + ':00',
+      read_count: 0,
+      device_count: 0,
+      devices: new Set<string>()
+    };
+  });
+};
+
+const [liveHourlyData, setLiveHourlyData] = useState(create24HourBuckets());
+
+
+useEffect(() => {
+   const socket = io('http://localhost:3001');
+ 
+  socket.on('tag_read', (tag) => {
+    const tagTime = new Date(tag.timestamp);
+    const hourKey = tagTime.getHours();
+
+    setLiveHourlyData(prev =>
+      prev.map(bucket => {
+        if (bucket.hour.startsWith(hourKey.toString().padStart(2, '0'))) {
+          bucket.read_count += 1;
+          bucket.devices.add(tag.device);
+          bucket.device_count = bucket.devices.size;
+        }
+        return { ...bucket, devices: bucket.devices };
+      })
+    );
+  });
+
+}, []);
+
+useEffect(() => {
+  loadAnalyticsData().then(() => {
+    setLiveHourlyData(prev => {
+      const merged = [...prev];
+      data.hourlyPatterns.forEach(h => {
+        const index = merged.findIndex(
+          b => b.hour.startsWith(h.hour)
+        );
+        if (index >= 0) {
+          merged[index].read_count += h.read_count;
+        }
+      });
+      return merged;
+    });
+  });
+}, []);
+
   // Chart refs for export functionality
   const dailyTrendsRef = useRef<HTMLDivElement>(null);
   const weeklyTrendsRef = useRef<HTMLDivElement>(null);
@@ -236,9 +294,9 @@ export const AnalyticsPage: React.FC = () => {
             </div>
             {data.hourlyPatterns.length > 0 ? (
               <ResponsiveContainer width="100%" height={300}>
-                <LineChart data={data.hourlyPatterns.slice(-48)}>
+                <LineChart data={liveHourlyData}>
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="hour" />
+                  <XAxis dataKey="hour" interval={0} />
                   <YAxis />
                   <Tooltip />
                   <Legend />

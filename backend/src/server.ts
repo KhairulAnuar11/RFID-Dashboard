@@ -7,6 +7,8 @@ import mysql from 'mysql2/promise';
 import mqtt from 'mqtt';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import { Server as SocketIOServer } from 'socket.io';
+import http from 'http';
 
 dotenv.config();
 
@@ -24,6 +26,11 @@ declare global {
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+const server = http.createServer(app);
+const io = new SocketIOServer(server, {
+  cors: { origin: '*' }
+});
 
 // Middleware
 app.use(helmet());
@@ -94,8 +101,18 @@ function connectMQTT() {
   mqttClient.on('error', (error) => {
     console.error('[MQTT] Connection error:', error);
   });
-}
 
+  mqttClient.on('message', (topic, message) => {
+  const payload = JSON.parse(message.toString());
+
+  io.emit('tag_read', {
+    epc: payload.data.EPC,
+    rssi: payload.data.RSSI,
+    device: payload.data.Device,
+    timestamp: payload.data.ReadTime
+  });
+});
+}
 
 function getSafeReadTime(input: any): string {
   let parsedDate: Date | null = null;
