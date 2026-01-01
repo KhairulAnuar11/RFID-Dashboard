@@ -97,39 +97,17 @@ function connectMQTT() {
         });
     });
 }
-function getSafeReadTime(input) {
-    let parsedDate = null;
-    // Robust parsing: accept ISO, space-separated local datetimes and treat
-    // incoming strings as UTC when no timezone is provided. This makes server
-    // behaviour deterministic regardless of host local timezone/clock.
-    if (typeof input === 'string') {
-        let s = input.trim();
-        // Common format 'YYYY-MM-DD HH:MM:SS' -> convert to 'YYYY-MM-DDTHH:MM:SSZ' (UTC)
-        if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) {
-            s = s.replace(' ', 'T') + 'Z';
-        }
-        else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s)) {
-            // If string has no timezone, assume UTC
-            s = s + 'Z';
-        }
-        parsedDate = new Date(s);
-        if (isNaN(parsedDate.getTime()))
-            parsedDate = null;
-    }
-    else if (input instanceof Date) {
-        if (!isNaN(input.getTime()))
-            parsedDate = input;
-    }
+// Replace the getSafeReadTime function with this simple version:
+function getSafeReadTime() {
+    // Always use current server time
     const now = new Date();
-    // Do not overwrite parsed reader timestamps — prefer reader-provided time when parseable.
-    const useDate = parsedDate || now;
-    // Format to MySQL DATETIME (YYYY-MM-DD HH:MM:SS) using UTC components
-    const year = useDate.getUTCFullYear();
-    const month = String(useDate.getUTCMonth() + 1).padStart(2, '0');
-    const day = String(useDate.getUTCDate()).padStart(2, '0');
-    const hours = String(useDate.getUTCHours()).padStart(2, '0');
-    const minutes = String(useDate.getUTCMinutes()).padStart(2, '0');
-    const seconds = String(useDate.getUTCSeconds()).padStart(2, '0');
+    // Format to MySQL DATETIME (YYYY-MM-DD HH:MM:SS) in local server time
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const hours = String(now.getHours()).padStart(2, '0');
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const seconds = String(now.getSeconds()).padStart(2, '0');
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 // Convert a local datetime string "YYYY-MM-DD HH:MM:SS" to an ISO string
@@ -190,7 +168,7 @@ function normalizeToISOStringUTC(input) {
     }
     return null;
 }
-// Save tag data to database
+// Update the saveTagData function (look for the section around line 120-170):
 async function saveTagData(data, rawPayload) {
     try {
         console.log('[DB] Attempting to save tag');
@@ -198,30 +176,19 @@ async function saveTagData(data, rawPayload) {
             // Nothing to save
             return;
         }
-        // If the data is a raw string (non-JSON), store it as rawPayload and skip
+        // If the data is a raw string (non-JSON), store it as rawPayload
         if (typeof data === 'string') {
             const queryRaw = `
-      INSERT INTO rfid_tags (epc, tid, rssi, antenna, reader_id, reader_name, read_time, raw_payload, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())
-    `;
-            await pool.execute(queryRaw, [null, null, null, null, 'UNKNOWN', 'UNKNOWN', getSafeReadTime(new Date()), rawPayload || data]);
+        INSERT INTO rfid_tags (epc, tid, rssi, antenna, reader_id, reader_name, read_time, raw_payload, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
+      `;
+            await pool.execute(queryRaw, [null, null, null, null, 'UNKNOWN', 'UNKNOWN', getSafeReadTime(), rawPayload || data]);
             console.log('[DB] ✅ Raw string payload saved');
             return;
         }
-        // Prefer RFID timestamp fields from MQTT payload (do NOT use ISO `timestamp`).
-        // Accept multiple payload shapes / casings commonly emitted by readers: ReadTime, readTime, read_time, timestamp, Timestamp
-        const readTimeCandidates = [
-            data.read_time,
-            data.readTime,
-            data.ReadTime,
-            data.timestamp,
-            data.Timestamp,
-            data.time,
-            (data.data && (data.data.readTime ?? data.data.ReadTime ?? data.data.read_time ?? data.data.timestamp ?? data.data.Timestamp))
-        ];
-        const readTimeRaw = readTimeCandidates.find(v => v !== undefined && v !== null) ?? new Date();
-        const readTime = getSafeReadTime(readTimeRaw);
-        // Normalize common tag fields with multiple possible payload shapes (EPC/TID/RSSI etc.)
+        // ALWAYS use current server time - ignore any timestamps from RFID reader
+        const readTime = getSafeReadTime(); // Current server time
+        // Normalize common tag fields with multiple possible payload shapes
         const epcVal = data.epc || data.tag_id || data.EPC || (data.data && (data.data.EPC || data.data.epc)) || null;
         const tidVal = data.tid || data.TID || (data.data && (data.data.TID || data.data.tid)) || null;
         const rssiVal = data.rssi ?? data.RSSI ?? (data.data && (data.data.RSSI ?? data.data.rssi)) ?? null;
@@ -230,9 +197,9 @@ async function saveTagData(data, rawPayload) {
         const readerNameVal = data.reader_name || data.readerName || data.Device || (data.data && (data.data.Device || data.data.reader_name)) || 'UNKNOWN';
         const query = `
       INSERT INTO rfid_tags (epc, tid, rssi, antenna, reader_id, reader_name, read_time, raw_payload, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
     `;
-        // Safely stringify payload for raw storage; prefer provided rawPayload string (unparsed)
+        // Safely stringify payload for raw storage
         let rawToStore = null;
         if (rawPayload && typeof rawPayload === 'string')
             rawToStore = rawPayload;
@@ -246,8 +213,6 @@ async function saveTagData(data, rawPayload) {
                 rawToStore = null;
             }
         }
-        // created_at: prefer readTime (reader-provided) else current UTC
-        const createdAtVal = readTime || formatDateToMySQLUTC(new Date());
         await pool.execute(query, [
             epcVal,
             tidVal,
@@ -255,11 +220,11 @@ async function saveTagData(data, rawPayload) {
             antennaVal,
             readerIdVal,
             readerNameVal,
-            readTime,
-            rawToStore,
-            createdAtVal
+            readTime, // Current server time
+            rawToStore
+            // created_at is set to NOW() in the query
         ]);
-        console.log('[DB] ✅ Tag saved successfully');
+        console.log('[DB] ✅ Tag saved with current server timestamp:', readTime);
     }
     catch (error) {
         console.error('[DB] Error saving tag data:', error);
@@ -528,7 +493,7 @@ app.get('/api/tags', authenticateToken, async (req, res) => {
         res.status(500).json({ success: false, error: 'Failed to fetch tags' });
     }
 });
-// Save Tags (POST)
+// In the POST /api/tags route
 app.post('/api/tags', authenticateToken, async (req, res) => {
     try {
         let tagsToSave = Array.isArray(req.body) ? req.body : [req.body];
@@ -548,13 +513,8 @@ app.post('/api/tags', authenticateToken, async (req, res) => {
                 const readerId = tag.reader_id ?? tag.readerId ?? tag.readerID ?? 'UNKNOWN';
                 const readerName = tag.reader_name ?? tag.readerName ?? tag.deviceName ?? 'UNKNOWN';
                 const rawPayload = tag.raw_payload ?? tag.rawPayload ?? tag.payload ?? null;
-                // Format datetime for MySQL - convert ISO format to MySQL datetime format
-                //const readTimeRaw = tag.read_time ?? tag.readTime ?? tag.timestamp ?? new Date();
-                //const readTime = formatDateTimeForMySQL(readTimeRaw);
-                // Prefer the RFID-provided `read_time` / `readTime` (do NOT use ISO `timestamp`)
-                // fall back to server time when missing.
-                const readTimeRaw = tag.read_time ?? tag.readTime ?? new Date();
-                const readTime = getSafeReadTime(readTimeRaw); // MySQL DATETIME (UTC)
+                // ALWAYS use current server time - ignore any provided timestamp
+                const readTime = getSafeReadTime(); // Current server time
                 // Skip if epc is still null - this is required
                 if (!epc) {
                     console.warn('[Tags] ⚠️  Skipping tag with null epc. Full tag data:', tag);
@@ -563,9 +523,8 @@ app.post('/api/tags', authenticateToken, async (req, res) => {
                 }
                 const query = `
           INSERT INTO rfid_tags (epc, tid, rssi, antenna, reader_id, reader_name, read_time, raw_payload, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
         `;
-                const createdAt = readTime || formatDateToMySQLUTC(new Date());
                 await pool.execute(query, [
                     epc,
                     tid,
@@ -573,12 +532,12 @@ app.post('/api/tags', authenticateToken, async (req, res) => {
                     antenna,
                     readerId,
                     readerName,
-                    readTime,
-                    rawPayload,
-                    createdAt
+                    readTime, // Current server time
+                    rawPayload
+                    // created_at is set to NOW() in the query
                 ]);
-                results.push({ epc, success: true });
-                console.log('[Tags] ✅ Tag saved');
+                results.push({ epc, success: true, timestamp: readTime });
+                console.log('[Tags] ✅ Tag saved with current server timestamp:', readTime);
             }
             catch (error) {
                 console.error('[Tags] Error saving individual tag:', error.message || error);
@@ -589,7 +548,7 @@ app.post('/api/tags', authenticateToken, async (req, res) => {
         res.json({
             success: successCount > 0,
             data: results,
-            message: `Saved ${successCount}/${tagsToSave.length} tags`
+            message: `Saved ${successCount}/${tagsToSave.length} tags with current server timestamps`
         });
     }
     catch (error) {

@@ -8,6 +8,7 @@ import { useRFID } from '../context/RFIDContext';
 import { apiService } from '../services/apiService';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
+import * as htmlToImage from 'html-to-image';
 
 export const DashboardPage: React.FC = () => {
   const { stats, tags, isConnected, connectionStatus, refreshData, clearTags, statsTrends } = useRFID();
@@ -100,7 +101,7 @@ export const DashboardPage: React.FC = () => {
       
       return () => clearInterval(dayCheckInterval);
     }, []);
-    
+
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
@@ -142,6 +143,29 @@ export const DashboardPage: React.FC = () => {
     }
   };
 
+    // Image Export PNG
+      const exportChartAsImage = async (
+      elementId: string,
+      filename: string
+    ) => {
+      const node = document.getElementById(elementId);
+      if (!node) {
+        toast.error('Chart not found');
+        return;
+      }
+  
+      try {
+        const dataUrl = await htmlToImage.toPng(node);
+        const link = document.createElement('a');
+        link.download = filename;
+        link.href = dataUrl;
+        link.click();
+        toast.success('Chart exported as image');
+      } catch {
+        toast.error('Failed to export image');
+      }
+    };
+  
   return (
     <div className="flex-1 flex flex-col bg-gray-50">
       <Header title="Dashboard Overview">

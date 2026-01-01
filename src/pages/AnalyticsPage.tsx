@@ -168,6 +168,20 @@ export const AnalyticsPage: React.FC = () => {
     toast.success(`Device performance exported as ${format.toUpperCase()}`);
   };
 
+    //Location Distribution Logic
+    const totalReadsAllLocations = assetsByLocation.reduce(
+    (sum, loc) => sum + loc.total_reads,
+    0
+    );
+
+  const locationDistribution = assetsByLocation.map(loc => ({
+    location: loc.location,
+    percentage: totalReadsAllLocations
+      ? Number(((loc.total_reads / totalReadsAllLocations) * 100).toFixed(2))
+      : 0,
+    total_reads: loc.total_reads
+  }));
+
   if (isLoading) {
     return (
       <div className="flex-1 flex flex-col bg-gray-50">
@@ -657,4 +671,4 @@ export const AnalyticsPage: React.FC = () => {
         </div>
     </div>
   );
-};
+}

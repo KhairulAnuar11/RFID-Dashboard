@@ -26,6 +26,13 @@ interface WeeklyTrend {
   unique_tags: number;
 }
 
+interface AssetLocationData {
+  location: string;
+  total_reads: number;
+  unique_tags: number;
+  avg_rssi: number;
+}
+
 class AnalyticsService {
   /**
    * Get 24-hour activity data (real-time, resets daily)
@@ -82,6 +89,19 @@ class AnalyticsService {
         year: item.year,
         unique_tags: item.unique_tags
       }));
+    }
+    
+    return [];
+  }
+
+  /**
+   * Get assets count by location
+   */
+  async getAssetsByLocation(): Promise<AssetLocationData[]> {
+    const response = await apiService.getAssetsByLocation();
+    
+    if (response.success && response.data) {
+      return response.data;
     }
     
     return [];
