@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Filter, X } from 'lucide-react';
+import { Filter, X, Activity, Sparkles } from 'lucide-react';
 import { Header } from '../components/layout/Header';
 import { DataTable } from '../components/ui/DataTable';
 import { ExportButton } from '../components/ui/ExportButton';
@@ -16,6 +16,7 @@ export const TagsPage: React.FC = () => {
   const [showFilters, setShowFilters] = useState(false);
   const [filters, setFilters] = useState<FilterOptions>({});
 
+  
   /* ---------------------------------------------------
      1. FILTERED TAGS (BASE)
   --------------------------------------------------- */
@@ -135,26 +136,31 @@ export const TagsPage: React.FC = () => {
 
       <div className="flex-1 p-8 overflow-y-auto">
 
-        {/* Tabs */}
-        <div className="flex gap-4 mb-6">
+        {/* Tabs Container */}
+        <div className="g-white rounded-lg border border-gray-200 p-2 mb-6 flex gap-2">
           <button
             onClick={() => setActiveTab('live')}
-            className={`px-4 py-2 rounded-lg ${
-              activeTab === 'live'
-                ? 'bg-indigo-600 text-white'
-                : 'bg-white border'
-            }`}
+            className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg transition-all
+              ${
+                activeTab === 'live'
+                  ? 'bg-indigo-600 text-white shadow'
+                  : 'text-gray-600 hover:bg-gray-100'
+              }`}
           >
+            <Activity className="size-4" />
             Live Tags
           </button>
+
           <button
             onClick={() => setActiveTab('unique')}
-            className={`px-4 py-2 rounded-lg ${
-              activeTab === 'unique'
-                ? 'bg-indigo-600 text-white'
-                : 'bg-white border'
-            }`}
+            className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg transition-all
+              ${
+                activeTab === 'unique'
+                  ? 'bg-indigo-600 text-white shadow'
+                  : 'text-gray-600 hover:bg-gray-100'
+              }`}
           >
+            <Sparkles className="size-4" />
             Unique Tags
           </button>
         </div>
