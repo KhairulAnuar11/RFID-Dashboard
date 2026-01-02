@@ -1,6 +1,6 @@
-dashboard
+// Updated DashboardPage.tsx with proper today's data display
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { Tag, Radio, Hash, AlertTriangle, RefreshCw, Trash2 } from 'lucide-react';
 import { Header } from '../components/layout/Header';
 import { StatCard } from '../components/ui/StatCard';
@@ -10,50 +10,16 @@ import { useRFID } from '../context/RFIDContext';
 import { apiService } from '../services/apiService';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
-import * as htmlToImage from 'html-to-image';
 
 export const DashboardPage: React.FC = () => {
   const { stats, tags, isConnected, connectionStatus, refreshData, clearTags, statsTrends } = useRFID();
   const [activityData, setActivityData] = useState<{ time: string; count: number }[]>([]);
   const [deviceData, setDeviceData] = useState<{ device: string; count: number }[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [currentDate, setCurrentDate] = useState(new Date().toLocaleDateString());
 
   // Load chart data
-  useEffect(() => {
-    loadChartData();
-  }, []);
-
-    const processActivityData = (rawData: { time: string; count: number }[]) => {
-      // Backend now returns proper 24-hour rolling data
-      // Just ensure it's in the right format
-      if (!rawData || rawData.length === 0) {
-        return Array.from({ length: 24 }, (_, i) => ({
-          time: i.toString().padStart(2, '0') + ':00',
-          count: 0
-        }));
-      }
-      
-      // Backend should return 24 hours, but if not, fill missing ones
-      const dataMap = new Map<string, number>();
-      rawData.forEach(item => {
-        if (item.time) {
-          const hourPart = item.time.split(':')[0].padStart(2, '0');
-          const hourKey = hourPart + ':00';
-          dataMap.set(hourKey, Number(item.count) || 0);
-        }
-      });
-      
-      // Generate 24 hours
-      return Array.from({ length: 24 }, (_, hour) => {
-        const hourLabel = hour.toString().padStart(2, '0') + ':00';
-        return {
-          time: hourLabel,
-          count: dataMap.get(hourLabel) || 0
-        };
-      });
-    };
-
-  const loadChartData = async () => {
+  const loadChartData = useCallback(async () => {
     try {
       const [activityResponse, deviceResponse] = await Promise.all([
         apiService.getTagActivity('24h'),
@@ -61,8 +27,8 @@ export const DashboardPage: React.FC = () => {
       ]);
 
       if (activityResponse.success && activityResponse.data) {
-        // Process the data for rolling 24-hour display
-        const processedData = processActivityData(activityResponse.data);
+        // Process today's hourly data
+        const processedData = processTodayActivityData(activityResponse.data);
         setActivityData(processedData);
       }
 
@@ -72,48 +38,87 @@ export const DashboardPage: React.FC = () => {
     } catch (error) {
       console.error('[Dashboard] Failed to load chart data:', error);
     }
+  }, []);
+
+  // Process activity data to ensure all 24 hours are present for TODAY
+  const processTodayActivityData = (rawData: any[]) => {
+    const now = new Date();
+    const currentHour = now.getHours();
+    
+    // Create a map of existing data
+    const dataMap = new Map<string, number>();
+    if (rawData && Array.isArray(rawData)) {
+      rawData.forEach(item => {
+        if (item.time) {
+          dataMap.set(item.time, Number(item.count) || 0);
+        }
+      });
+    }
+    
+    // Generate all 24 hours for today with current data
+    return Array.from({ length: 24 }, (_, hour) => {
+      const hourLabel = hour.toString().padStart(2, '0') + ':00';
+      const count = dataMap.get(hourLabel) || 0;
+      const isPast = hour <= currentHour;
+      
+      return {
+        time: hourLabel,
+        count: count,
+        // Visual indicator for styling
+        opacity: isPast ? 1 : 0.3
+      };
+    });
   };
 
-  // Update the auto-refresh useEffect to refresh more frequently
+  // Check if it's a new day and reset data
+  const checkForNewDay = useCallback(() => {
+    const newDate = new Date().toLocaleDateString();
+    if (newDate !== currentDate) {
+      console.log('[Dashboard] New day detected - resetting data');
+      setCurrentDate(newDate);
+      // Clear activity data to show fresh start
+      setActivityData(Array.from({ length: 24 }, (_, hour) => ({
+        time: hour.toString().padStart(2, '0') + ':00',
+        count: 0,
+        opacity: 0.3
+      })));
+      // Load fresh data
+      loadChartData();
+    }
+  }, [currentDate, loadChartData]);
+
+  // Initial load
   useEffect(() => {
     loadChartData();
-    
-    // Refresh every 30 seconds to show real-time data
-    const interval = setInterval(() => {
+  }, [loadChartData]);
+
+  // Auto-refresh every 30 seconds
+  useEffect(() => {
+    const refreshInterval = setInterval(() => {
       loadChartData();
     }, 30000); // 30 seconds
 
-    return () => clearInterval(interval);
-  }, []);
+    return () => clearInterval(refreshInterval);
+  }, [loadChartData]);
 
-  // Add a function to check if we need to reset (new day detection)
+  // Check for new day every minute
   useEffect(() => {
-    const checkForNewDay = () => {
-      const lastRefreshDate = localStorage.getItem('lastDashboardRefresh');
-      const currentDate = new Date().toISOString().split('T')[0];
-      
-      if (lastRefreshDate !== currentDate) {
-        // New day detected - force refresh
-        console.log('[Dashboard] New day detected - refreshing data');
-        loadChartData();
-        localStorage.setItem('lastDashboardRefresh', currentDate);
-      }
-    };
+    const dayCheckInterval = setInterval(checkForNewDay, 60000); // 1 minute
     
-    // Check every minute if it's a new day
-    const dayCheckInterval = setInterval(checkForNewDay, 60000);
-    
-    // Initial check
+    // Also check immediately
     checkForNewDay();
     
     return () => clearInterval(dayCheckInterval);
-  }, []);
+  }, [checkForNewDay]);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
       await refreshData();
       await loadChartData();
+      toast.success('Data refreshed');
+    } catch (error) {
+      toast.error('Failed to refresh data');
     } finally {
       setIsRefreshing(false);
     }
@@ -128,63 +133,45 @@ export const DashboardPage: React.FC = () => {
   // Live tag stream (last 10 tags)
   const recentTags = tags.slice(0, 10);
 
-  // Format a timestamp string (ISO or "YYYY-MM-DD HH:MM:SS") as UTC time HH:MM:SS
-  const formatUTCTime = (raw?: string | null) => {
+  // Format timestamp as local time
+  const formatLocalTime = (timestamp?: string | null) => {
     try {
-      if (!raw) return new Date().toUTCString().split(' ')[4];
-      let s = raw.trim();
-      // If local-style DB string, convert to ISO-like with Z
-      if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) {
-        s = s.replace(' ', 'T') + 'Z';
-      } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s)) {
-        s = s + 'Z';
+      if (!timestamp) return new Date().toLocaleTimeString();
+      
+      let dateStr = timestamp.trim();
+      // Handle MySQL datetime format
+      if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(dateStr)) {
+        dateStr = dateStr.replace(' ', 'T');
       }
-      const d = new Date(s);
-      if (isNaN(d.getTime())) return new Date().toUTCString().split(' ')[4];
-      const hh = String(d.getUTCHours()).padStart(2, '0');
-      const mm = String(d.getUTCMinutes()).padStart(2, '0');
-      const ss = String(d.getUTCSeconds()).padStart(2, '0');
-      return `${hh}:${mm}:${ss}`;
+      
+      const date = new Date(dateStr);
+      if (isNaN(date.getTime())) {
+        return new Date().toLocaleTimeString();
+      }
+      
+      return date.toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
+        minute: '2-digit', 
+        second: '2-digit',
+        hour12: false 
+      });
     } catch {
-      return new Date().toUTCString().split(' ')[4];
+      return new Date().toLocaleTimeString();
     }
   };
 
-    // Image Export PNG
-      const exportChartAsImage = async (
-      elementId: string,
-      filename: string
-    ) => {
-      const node = document.getElementById(elementId);
-      if (!node) {
-        toast.error('Chart not found');
-        return;
-      }
-  
-      try {
-        const dataUrl = await htmlToImage.toPng(node);
-        const link = document.createElement('a');
-        link.download = filename;
-        link.href = dataUrl;
-        link.click();
-        toast.success('Chart exported as image');
-      } catch {
-        toast.error('Failed to export image');
-      }
-    };
-  
   return (
     <div className="flex-1 flex flex-col bg-gray-50">
       <Header title="Dashboard Overview">
         <div className="flex items-center gap-3">
           {/* Connection Status */}
-          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm $\{
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm ${
             connectionStatus === 'connected' ? 'bg-green-100 text-green-700' :
             connectionStatus === 'reconnecting' ? 'bg-orange-100 text-orange-700' :
             connectionStatus === 'error' ? 'bg-red-100 text-red-700' :
             'bg-gray-100 text-gray-700'
           }`}>
-            <div className={`size-2 rounded-full $\{isConnected ? 'bg-green-600 animate-pulse' : 'bg-gray-400'}`} />
+            <div className={`size-2 rounded-full ${isConnected ? 'bg-green-600 animate-pulse' : 'bg-gray-400'}`} />
             {connectionStatus === 'connected' ? 'MQTT Connected' :
              connectionStatus === 'reconnecting' ? 'Reconnecting...' :
              connectionStatus === 'error' ? 'Connection Error' :
@@ -196,7 +183,7 @@ export const DashboardPage: React.FC = () => {
             disabled={isRefreshing}
             className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50"
           >
-            <RefreshCw className={`size-4 $\{isRefreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`size-4 ${isRefreshing ? 'animate-spin' : ''}`} />
             Refresh
           </button>
 
@@ -280,9 +267,9 @@ export const DashboardPage: React.FC = () => {
               data={activityData}
               dataKey="count"
               xAxisKey="time"
-              title="24-Hour Tag Activity"
+              title={`Today's Tag Activity`}
               color="#4F46E5"
-              description="Live tag count for the last 24 hours"
+              description={`Live hourly tag counts for today (${currentDate})`}
             />
           </motion.div>
           
@@ -295,7 +282,7 @@ export const DashboardPage: React.FC = () => {
               data={deviceData}
               dataKey="count"
               xAxisKey="device"
-              title="Tags per Device"
+              title="Tags per Device (Today)"
               color="#10B981"
             />
           </motion.div>
@@ -313,7 +300,7 @@ export const DashboardPage: React.FC = () => {
             <div className="flex items-center gap-2">
               <span className="size-2 bg-green-500 rounded-full animate-pulse" />
               <span className="text-sm text-gray-600">Live</span>
-              <span className="text-sm text-gray-400">({tags.length} total)</span>
+              <span className="text-sm text-gray-400">({tags.length} Total)</span>
             </div>
           </div>
 
@@ -340,7 +327,7 @@ export const DashboardPage: React.FC = () => {
                   <div className="text-right">
                     <p className="text-sm text-gray-700">{tag.readerName}</p>
                     <p className="text-xs text-gray-500">
-                      {formatUTCTime(tag.readTime ?? tag.read_time)} | RSSI: {tag.rssi}dBm | Ant: {tag.antenna}
+                      {formatLocalTime(tag.readTime || tag.read_time)} | RSSI: {tag.rssi}dBm | Ant: {tag.antenna}
                     </p>
                   </div>
                 </motion.div>

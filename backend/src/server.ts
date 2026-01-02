@@ -663,35 +663,96 @@ app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
   }
 });
 
-// Get Activity Data (24 hours) - UPDATED
 app.get('/api/dashboard/activity', authenticateToken, async (req, res) => {
   try {
-    // Get current hour in UTC
-    const currentHour = new Date().getUTCHours();
+    // Get current local date and time
+    const now = new Date();
+    const currentHour = now.getHours();
     
-    // Query for last 24 hours of data
+    // Query for TODAY's data only (local date)
     const [rows] = await pool.execute(`
+      WITH RECURSIVE hours AS (
+        SELECT 0 as hour_number
+        UNION ALL
+        SELECT hour_number + 1 
+        FROM hours 
+        WHERE hour_number < 23
+      )
       SELECT 
-        DATE_FORMAT(read_time, '%H:00') as time,
-        COUNT(*) as count
-      FROM rfid_tags
-      WHERE read_time >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-      GROUP BY DATE_FORMAT(read_time, '%H:00')
-      ORDER BY time
+        hours.hour_number,
+        CONCAT(LPAD(hours.hour_number, 2, '0'), ':00') as time,
+        COALESCE(
+          (
+            SELECT COUNT(*) 
+            FROM rfid_tags 
+            WHERE DATE(read_time) = CURDATE()
+              AND HOUR(read_time) = hours.hour_number
+          ), 
+          0
+        ) as count
+      FROM hours
+      ORDER BY hours.hour_number ASC
     `) as any;
 
-    // Ensure all 24 hourly buckets are present
-    const rowsArr: { time: string; count: number }[] = (rows || []) as any[];
-    const fullDay = Array.from({ length: 24 }, (_, hour) => {
-      const label = String(hour).padStart(2, '0') + ':00';
-      const found = rowsArr.find(r => String(r.time) === label);
-      return { time: label, count: found ? Number(found.count) : 0 };
-    });
+    // Format the data
+    const formattedData = (rows as any[]).map((row) => ({
+      time: row.time,
+      count: Number(row.count) || 0,
+      isPast: row.hour_number <= currentHour,
+      isCurrent: row.hour_number === currentHour
+    }));
 
-    res.json({ success: true, data: fullDay });
+    res.json({ 
+      success: true, 
+      data: formattedData,
+      metadata: {
+        currentHour: currentHour,
+        currentDate: now.toISOString().split('T')[0],
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+      }
+    });
   } catch (error) {
     console.error('[Dashboard] Activity error:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch activity' });
+  }
+});
+
+// Add a new endpoint for the last 24 hours rolling window (optional)
+app.get('/api/dashboard/activity-rolling', authenticateToken, async (req, res) => {
+  try {
+    // This gets the LAST 24 hours from now, not today's hours
+    const [rows] = await pool.execute(`
+      WITH RECURSIVE hours AS (
+        SELECT 0 as hour_offset
+        UNION ALL
+        SELECT hour_offset + 1 
+        FROM hours 
+        WHERE hour_offset < 23
+      )
+      SELECT 
+        DATE_FORMAT(DATE_SUB(NOW(), INTERVAL hour_offset HOUR), '%H:00') as time,
+        COALESCE(
+          (
+            SELECT COUNT(*) 
+            FROM rfid_tags 
+            WHERE read_time >= DATE_SUB(NOW(), INTERVAL hour_offset + 1 HOUR)
+              AND read_time < DATE_SUB(NOW(), INTERVAL hour_offset HOUR)
+          ), 
+          0
+        ) as count
+      FROM hours
+      ORDER BY hour_offset DESC
+    `) as any;
+
+    const formattedData = (rows as any[]).map((row) => ({
+      time: row.time,
+      count: Number(row.count) || 0
+    }));
+
+    res.json({ success: true, data: formattedData });
+  } catch (error) {
+    console.error('[Dashboard] Rolling activity error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch rolling activity' });
   }
 });
 
