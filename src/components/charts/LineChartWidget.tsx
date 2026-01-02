@@ -9,6 +9,8 @@ interface LineChartWidgetProps {
   description?: string;
   color?: string;
   height?: number;
+  xAxisLabel?: string;
+  yAxisLabel?: string;
 }
 
 export const LineChartWidget: React.FC<LineChartWidgetProps> = ({
@@ -18,7 +20,9 @@ export const LineChartWidget: React.FC<LineChartWidgetProps> = ({
   title,
   description,
   color = '#4F46E5',
-  height = 300
+  height = 300,
+  xAxisLabel,
+  yAxisLabel
 }) => {
   const ticks = Array.isArray(data) ? data.map(d => (d && d[xAxisKey] != null ? String(d[xAxisKey]) : '')) : undefined;
   return (
@@ -28,7 +32,7 @@ export const LineChartWidget: React.FC<LineChartWidgetProps> = ({
         {description && <p className="text-sm text-gray-500">{description}</p>}
       </div>
       <ResponsiveContainer width="100%" height={height}>
-        <LineChart data={data}>
+        <LineChart data={data} margin={{ top: 5, right: 30, left: 20, bottom: 25 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
           <XAxis 
             dataKey={xAxisKey}
@@ -37,6 +41,7 @@ export const LineChartWidget: React.FC<LineChartWidgetProps> = ({
             type="category"
             ticks={ticks}
             interval={0}
+            label={xAxisLabel ? { value: xAxisLabel, position: 'insideBottom', offset: -15, style: { fontSize: '12px', fill: '#6B7280' } } : undefined}
             tickFormatter={(value: any) => {
               try {
                 if (typeof value === 'string') {
@@ -66,6 +71,7 @@ export const LineChartWidget: React.FC<LineChartWidgetProps> = ({
           <YAxis 
             stroke="#6B7280"
             style={{ fontSize: '12px' }}
+            label={yAxisLabel ? { value: yAxisLabel, angle: -90, position: 'insideLeft', style: { textAnchor: 'middle', fontSize: '12px', fill: '#6B7280' } } : undefined}
           />
           <Tooltip 
             contentStyle={{
