@@ -1,3 +1,5 @@
+dashboard
+
 import React, { useEffect, useState } from 'react';
 import { Tag, Radio, Hash, AlertTriangle, RefreshCw, Trash2 } from 'lucide-react';
 import { Header } from '../components/layout/Header';
@@ -21,44 +23,35 @@ export const DashboardPage: React.FC = () => {
     loadChartData();
   }, []);
 
-  // Function to process activity data for the last 24 hours (rolling window)
-  const processActivityData = (
-    rawData: { time: string; count: number }[]
-  ) => {
-    const now = new Date();
-    const currentHour = now.getUTCHours();
-    
-    // Create array for last 24 hours (rolling window)
-    const last24Hours = Array.from({ length: 24 }, (_, index) => {
-      // Calculate hour index for the rolling window
-      // Index 0 = current hour, index 1 = 1 hour ago, ..., index 23 = 23 hours ago
-      const hourIndex = (currentHour - index + 24) % 24;
-      const hourLabel = hourIndex.toString().padStart(2, '0') + ':00';
-      
-      // Try to find data for this hour from backend
-      let count = 0;
-      if (rawData && rawData.length > 0) {
-        const found = rawData.find(d => {
-          // Handle different time formats from backend
-          if (d.time) {
-            // Remove seconds if present (e.g., "00:00:00" -> "00:00")
-            const timePart = d.time.split(':').slice(0, 2).join(':');
-            return timePart === hourLabel;
-          }
-          return false;
-        });
-        count = found ? found.count : 0;
+    const processActivityData = (rawData: { time: string; count: number }[]) => {
+      // Backend now returns proper 24-hour rolling data
+      // Just ensure it's in the right format
+      if (!rawData || rawData.length === 0) {
+        return Array.from({ length: 24 }, (_, i) => ({
+          time: i.toString().padStart(2, '0') + ':00',
+          count: 0
+        }));
       }
-
-      return {
-        time: hourLabel,
-        count: count
-      };
-    });
-
-    // Reverse to show chronological order (oldest to newest)
-    return last24Hours.reverse();
-  };
+      
+      // Backend should return 24 hours, but if not, fill missing ones
+      const dataMap = new Map<string, number>();
+      rawData.forEach(item => {
+        if (item.time) {
+          const hourPart = item.time.split(':')[0].padStart(2, '0');
+          const hourKey = hourPart + ':00';
+          dataMap.set(hourKey, Number(item.count) || 0);
+        }
+      });
+      
+      // Generate 24 hours
+      return Array.from({ length: 24 }, (_, hour) => {
+        const hourLabel = hour.toString().padStart(2, '0') + ':00';
+        return {
+          time: hourLabel,
+          count: dataMap.get(hourLabel) || 0
+        };
+      });
+    };
 
   const loadChartData = async () => {
     try {

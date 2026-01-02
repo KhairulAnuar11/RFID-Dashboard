@@ -292,13 +292,13 @@ app.get('/api/debug/analytics-check', authenticateToken, async (req, res) => {
         const [[{ count: totalCount }]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags');
         checks.total_records = totalCount;
         // Last 24 hours
-        const [[{ count: count24h }]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE read_time >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)');
+        const [[{ count: count24h }]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE read_time >= DATE_SUB(NOW(), INTERVAL 24 HOUR)');
         checks.last_24h = count24h;
         // Last 7 days
-        const [[{ count: count7d }]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE read_time >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 7 DAY)');
+        const [[{ count: count7d }]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE read_time >= DATE_SUB(NOW(), INTERVAL 7 DAY)');
         checks.last_7d = count7d;
         // Last 30 days
-        const [[{ count: count30d }]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE read_time >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY)');
+        const [[{ count: count30d }]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE read_time >= DATE_SUB(NOW(), INTERVAL 30 DAY)');
         checks.last_30d = count30d;
         // Sample data
         const [sampleData] = await pool.execute('SELECT * FROM rfid_tags ORDER BY read_time DESC LIMIT 3');
@@ -313,7 +313,7 @@ app.get('/api/debug/analytics-check', authenticateToken, async (req, res) => {
         COUNT(*) as total_reads,
         COUNT(DISTINCT epc) as unique_tags
       FROM rfid_tags
-      WHERE DATE(read_time) >= DATE_SUB(UTC_DATE(), INTERVAL 30 DAY)
+      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
       GROUP BY DATE(read_time)
       ORDER BY date ASC
       LIMIT 5
@@ -326,7 +326,7 @@ app.get('/api/debug/analytics-check', authenticateToken, async (req, res) => {
         COUNT(*) as count,
         COUNT(DISTINCT epc) as unique_tags
       FROM rfid_tags
-      WHERE DATE(read_time) >= DATE_SUB(UTC_DATE(), INTERVAL 7 DAY)
+      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
       GROUP BY HOUR(read_time)
       ORDER BY hour ASC
       LIMIT 5
@@ -340,7 +340,7 @@ app.get('/api/debug/analytics-check', authenticateToken, async (req, res) => {
         COUNT(*) as total_reads,
         COUNT(DISTINCT epc) as unique_tags
       FROM rfid_tags
-      WHERE read_time >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 12 WEEK)
+      WHERE read_time >= DATE_SUB(NOW(), INTERVAL 12 WEEK)
       GROUP BY YEAR(read_time), WEEK(read_time)
       ORDER BY year DESC, week DESC
       LIMIT 5
@@ -370,7 +370,7 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(401).json({ success: false, message: 'Invalid credentials' });
         }
         const token = jsonwebtoken_1.default.sign({ userId: user.id, username: user.username, role: user.role }, process.env.JWT_SECRET || 'your-secret-key', { expiresIn: '24h' });
-        await pool.execute('UPDATE users SET last_login = UTC_TIMESTAMP() WHERE id = ?', [user.id]);
+        await pool.execute('UPDATE users SET last_login = NOW() WHERE id = ?', [user.id]);
         res.json({
             success: true,
             data: {
@@ -513,7 +513,6 @@ app.post('/api/tags', authenticateToken, async (req, res) => {
                 const readerId = tag.reader_id ?? tag.readerId ?? tag.readerID ?? 'UNKNOWN';
                 const readerName = tag.reader_name ?? tag.readerName ?? tag.deviceName ?? 'UNKNOWN';
                 const rawPayload = tag.raw_payload ?? tag.rawPayload ?? tag.payload ?? null;
-                // ALWAYS use current server time - ignore any provided timestamp
                 const readTime = getSafeReadTime(); // Current server time
                 // Skip if epc is still null - this is required
                 if (!epc) {
@@ -559,7 +558,7 @@ app.post('/api/tags', authenticateToken, async (req, res) => {
 // Get Dashboard Stats
 app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
     try {
-        const [[tagsToday]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE DATE(read_time) = UTC_DATE()');
+        const [[tagsToday]] = await pool.execute('SELECT COUNT(*) as count FROM rfid_tags WHERE DATE(read_time) = CURDATE()');
         const [[activeReaders]] = await pool.execute('SELECT COUNT(*) as count FROM devices WHERE status = "online"');
         const [[uniqueTags]] = await pool.execute('SELECT COUNT(DISTINCT epc) as count FROM rfid_tags');
         const [[offlineDevices]] = await pool.execute('SELECT COUNT(*) as count FROM devices WHERE status = "offline"');
@@ -578,29 +577,35 @@ app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
         res.status(500).json({ success: false, error: 'Failed to fetch stats' });
     }
 });
-// Get Activity Data (24 hours) - UPDATED
+// Get Activity Data (24 hours) - TRUE ROLLING 24 HOURS
 app.get('/api/dashboard/activity', authenticateToken, async (req, res) => {
     try {
-        // Get current hour in UTC
-        const currentHour = new Date().getUTCHours();
-        // Query for last 24 hours of data
+        // This query gets the last 24 individual hours, not grouped by hour of day
         const [rows] = await pool.execute(`
+      WITH RECURSIVE hours AS (
+        SELECT 0 as hour_offset
+        UNION ALL
+        SELECT hour_offset + 1 
+        FROM hours 
+        WHERE hour_offset < 23
+      )
       SELECT 
-        DATE_FORMAT(read_time, '%H:00') as time,
-        COUNT(*) as count
-      FROM rfid_tags
-      WHERE read_time >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)
-      GROUP BY DATE_FORMAT(read_time, '%H:00')
-      ORDER BY time
+        DATE_FORMAT(DATE_SUB(NOW(), INTERVAL hour_offset HOUR), '%H:00') as time,
+        COALESCE((
+          SELECT COUNT(*) 
+          FROM rfid_tags 
+          WHERE read_time >= DATE_SUB(NOW(), INTERVAL hour_offset HOUR)
+            AND read_time < DATE_SUB(NOW(), INTERVAL hour_offset - 1 HOUR)
+        ), 0) as count
+      FROM hours
+      ORDER BY hour_offset DESC
     `);
-        // Ensure all 24 hourly buckets are present
-        const rowsArr = (rows || []);
-        const fullDay = Array.from({ length: 24 }, (_, hour) => {
-            const label = String(hour).padStart(2, '0') + ':00';
-            const found = rowsArr.find(r => String(r.time) === label);
-            return { time: label, count: found ? Number(found.count) : 0 };
-        });
-        res.json({ success: true, data: fullDay });
+        // Format the data
+        const formattedData = rows.map((row) => ({
+            time: row.time,
+            count: Number(row.count) || 0
+        }));
+        res.json({ success: true, data: formattedData });
     }
     catch (error) {
         console.error('[Dashboard] Activity error:', error);
@@ -615,7 +620,7 @@ app.get('/api/dashboard/tags-by-device', authenticateToken, async (req, res) => 
         reader_name as device,
         COUNT(*) as count
       FROM rfid_tags
-      WHERE DATE(read_time) = UTC_DATE()
+      WHERE DATE(read_time) = CURDATE()
       GROUP BY reader_name
       ORDER BY count DESC
       LIMIT 10
@@ -740,7 +745,7 @@ app.get('/api/analytics/weekly-trends', authenticateToken, async (req, res) => {
         YEAR(read_time) as year,
         COUNT(DISTINCT epc) as unique_tags
       FROM rfid_tags
-      WHERE read_time >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 12 WEEK)
+      WHERE read_time >= DATE_SUB(NOW(), INTERVAL 12 WEEK)
       GROUP BY YEAR(read_time), WEEK(read_time, 1)
       ORDER BY year DESC, week DESC
     `);
@@ -768,7 +773,7 @@ app.get('/api/analytics/antenna-stats', authenticateToken, async (req, res) => {
         AVG(rssi) as avg_rssi,
         MAX(read_time) as last_read
       FROM rfid_tags
-      WHERE DATE(read_time) >= DATE_SUB(UTC_DATE(), INTERVAL 7 DAY)
+      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
       GROUP BY reader_name, antenna
       ORDER BY reader_name, antenna
     `);
@@ -789,7 +794,7 @@ app.get('/api/analytics/hourly-patterns', authenticateToken, async (req, res) =>
         COUNT(*) as read_count,
         COUNT(DISTINCT reader_name) as device_count
       FROM rfid_tags
-      WHERE DATE(read_time) = UTC_DATE()
+      WHERE DATE(read_time) = CURDATE()
       GROUP BY DATE_FORMAT(read_time, '%H:00')
       ORDER BY hour ASC
     `);
@@ -822,7 +827,7 @@ app.get('/api/analytics/assets-by-location', authenticateToken, async (req, res)
         AVG(rssi) as avg_rssi,
         MAX(read_time) as last_read
       FROM rfid_tags
-      WHERE DATE(read_time) >= DATE_SUB(UTC_DATE(), INTERVAL 30 DAY)
+      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
       GROUP BY reader_name
       ORDER BY total_reads DESC
     `);
@@ -848,7 +853,7 @@ app.get('/api/analytics/top-tags', authenticateToken, async (req, res) => {
         AVG(rssi) as avg_rssi,
         MAX(read_time) as last_seen
       FROM rfid_tags
-      WHERE DATE(read_time) >= DATE_SUB(UTC_DATE(), INTERVAL ${days} DAY)
+      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL ${days} DAY)
       GROUP BY epc
       ORDER BY read_count DESC
       LIMIT ${limit}
@@ -875,7 +880,7 @@ app.get('/api/analytics/device-performance', authenticateToken, async (req, res)
         MIN(rssi) as worst_signal,
         MAX(read_time) as last_active
       FROM rfid_tags
-      WHERE DATE(read_time) >= DATE_SUB(UTC_DATE(), INTERVAL 30 DAY)
+      WHERE DATE(read_time) >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
       GROUP BY reader_id, reader_name
       ORDER BY total_reads DESC
     `);
@@ -886,12 +891,12 @@ app.get('/api/analytics/device-performance', authenticateToken, async (req, res)
         res.status(500).json({ success: false, error: 'Failed to fetch device performance' });
     }
 });
-// Get Daily Trends - UPDATED (Shows both reads AND unique_tags, UTC dates)
+// Get Daily Trends - FIXED VERSION (Proper UTC handling)
 app.get('/api/analytics/daily-trends', authenticateToken, async (req, res) => {
     try {
         const daysParam = Array.isArray(req.query.days) ? req.query.days[0] : req.query.days;
         const days = Math.max(1, Math.min(365, parseInt(daysParam) || 30));
-        // Query returns both total reads and unique tags
+        // FIXED: Use UTC_TIMESTAMP for comparison and extract UTC date
         const [rows] = await pool.execute(`
       SELECT 
         DATE(read_time) as date,
@@ -900,20 +905,34 @@ app.get('/api/analytics/daily-trends', authenticateToken, async (req, res) => {
         COUNT(DISTINCT reader_name) as active_devices,
         AVG(rssi) as avg_rssi
       FROM rfid_tags
-      WHERE DATE(read_time) >= DATE_SUB(UTC_DATE(), INTERVAL ? DAY)
+      WHERE read_time >= DATE_SUB(NOW(), INTERVAL ? DAY)
       GROUP BY DATE(read_time)
       ORDER BY date ASC
     `, [days]);
-        // Format dates as UTC strings
-        const formattedData = rows.map(row => ({
-            date: row.date instanceof Date
-                ? row.date.toISOString().split('T')[0]
-                : String(row.date),
-            reads: Number(row.total_reads || 0),
-            unique_tags: Number(row.unique_tags || 0),
-            active_devices: Number(row.active_devices || 0),
-            avg_rssi: row.avg_rssi ? Number(row.avg_rssi).toFixed(2) : null
-        }));
+        // Format dates as UTC strings (YYYY-MM-DD)
+        const formattedData = rows.map(row => {
+            // Ensure date is in correct format
+            let dateStr;
+            if (row.date instanceof Date) {
+                // Convert Date object to UTC date string
+                dateStr = row.date.toISOString().split('T')[0];
+            }
+            else if (typeof row.date === 'string') {
+                // If it's already a string, ensure it's in YYYY-MM-DD format
+                dateStr = row.date.split(' ')[0]; // Remove time part if present
+            }
+            else {
+                // Fallback to current UTC date
+                dateStr = new Date().toISOString().split('T')[0];
+            }
+            return {
+                date: dateStr,
+                reads: Number(row.total_reads || 0),
+                unique_tags: Number(row.unique_tags || 0),
+                active_devices: Number(row.active_devices || 0),
+                avg_rssi: row.avg_rssi ? Number(row.avg_rssi).toFixed(2) : null
+            };
+        });
         res.json({ success: true, data: formattedData });
     }
     catch (error) {
@@ -930,9 +949,9 @@ app.get('/api/dashboard/stats-yesterday', authenticateToken, async (req, res) =>
         COUNT(*) as totalTags,
         COUNT(DISTINCT epc) as uniqueTags
       FROM rfid_tags
-      WHERE DATE(read_time) = DATE_SUB(UTC_DATE(), INTERVAL 1 DAY)
+      WHERE DATE(read_time) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)
     `);
-        const [[activeReaders]] = await pool.execute('SELECT COUNT(*) as count FROM devices WHERE status = "online" AND DATE(last_seen) = DATE_SUB(UTC_DATE(), INTERVAL 1 DAY)');
+        const [[activeReaders]] = await pool.execute('SELECT COUNT(*) as count FROM devices WHERE status = "online" AND DATE(last_seen) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)');
         res.json({
             success: true,
             data: {
