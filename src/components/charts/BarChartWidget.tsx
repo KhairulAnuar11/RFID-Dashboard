@@ -6,6 +6,7 @@ interface BarChartWidgetProps {
   dataKey: string;
   xAxisKey: string;
   title: string;
+  description?: string;
   color?: string;
   height?: number;
 }
@@ -15,12 +16,16 @@ export const BarChartWidget: React.FC<BarChartWidgetProps> = ({
   dataKey,
   xAxisKey,
   title,
+  description,
   color = '#10B981',
   height = 300
 }) => {
   return (
     <div className="bg-white rounded-lg border border-gray-200 p-6">
-      <h3 className="text-lg text-gray-900 mb-4">{title}</h3>
+      <div className="mb-4">
+        <h3 className="text-lg font-semibold text-gray-900">{title}</h3>
+        {description && <p className="text-sm text-gray-500">{description}</p>}
+      </div>
       <ResponsiveContainer width="100%" height={height}>
         <BarChart data={data}>
           <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />

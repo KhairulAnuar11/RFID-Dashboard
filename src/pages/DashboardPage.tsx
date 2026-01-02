@@ -21,86 +21,100 @@ export const DashboardPage: React.FC = () => {
     loadChartData();
   }, []);
 
-  // Auto-refresh data every 30 seconds
+  // Function to process activity data for the last 24 hours (rolling window)
+  const processActivityData = (
+    rawData: { time: string; count: number }[]
+  ) => {
+    const now = new Date();
+    const currentHour = now.getUTCHours();
+    
+    // Create array for last 24 hours (rolling window)
+    const last24Hours = Array.from({ length: 24 }, (_, index) => {
+      // Calculate hour index for the rolling window
+      // Index 0 = current hour, index 1 = 1 hour ago, ..., index 23 = 23 hours ago
+      const hourIndex = (currentHour - index + 24) % 24;
+      const hourLabel = hourIndex.toString().padStart(2, '0') + ':00';
+      
+      // Try to find data for this hour from backend
+      let count = 0;
+      if (rawData && rawData.length > 0) {
+        const found = rawData.find(d => {
+          // Handle different time formats from backend
+          if (d.time) {
+            // Remove seconds if present (e.g., "00:00:00" -> "00:00")
+            const timePart = d.time.split(':').slice(0, 2).join(':');
+            return timePart === hourLabel;
+          }
+          return false;
+        });
+        count = found ? found.count : 0;
+      }
+
+      return {
+        time: hourLabel,
+        count: count
+      };
+    });
+
+    // Reverse to show chronological order (oldest to newest)
+    return last24Hours.reverse();
+  };
+
+  const loadChartData = async () => {
+    try {
+      const [activityResponse, deviceResponse] = await Promise.all([
+        apiService.getTagActivity('24h'),
+        apiService.getTagsByDevice()
+      ]);
+
+      if (activityResponse.success && activityResponse.data) {
+        // Process the data for rolling 24-hour display
+        const processedData = processActivityData(activityResponse.data);
+        setActivityData(processedData);
+      }
+
+      if (deviceResponse.success && deviceResponse.data) {
+        setDeviceData(deviceResponse.data);
+      }
+    } catch (error) {
+      console.error('[Dashboard] Failed to load chart data:', error);
+    }
+  };
+
+  // Update the auto-refresh useEffect to refresh more frequently
   useEffect(() => {
+    loadChartData();
+    
+    // Refresh every 30 seconds to show real-time data
     const interval = setInterval(() => {
       loadChartData();
-    }, 30000);
+    }, 30000); // 30 seconds
 
     return () => clearInterval(interval);
   }, []);
 
-  const normalize24HourData = (
-  rawData: { time: string; count: number }[]
-    ) => {
-      const fullDay = Array.from({ length: 24 }, (_, hour) => {
-        const label = hour.toString().padStart(2, '0') + ':00';
-        const found = rawData.find(d => d.time === label);
-
-        return {
-          time: label,
-          count: found ? found.count : 0
-        };
-      });
-
-      return fullDay;
-    };
-
-    const loadChartData = async () => {
-      try {
-        const [activityResponse, deviceResponse] = await Promise.all([
-          apiService.getTagActivity('24h'),
-          apiService.getTagsByDevice()
-        ]);
-
-        if (activityResponse.success && activityResponse.data) {
-          // The backend already returns normalized 24-hour data
-          // This data represents the CURRENT rolling 24-hour window
-          setActivityData(activityResponse.data);
-        }
-
-        if (deviceResponse.success && deviceResponse.data) {
-          setDeviceData(deviceResponse.data);
-        }
-      } catch (error) {
-        console.error('[Dashboard] Failed to load chart data:', error);
+  // Add a function to check if we need to reset (new day detection)
+  useEffect(() => {
+    const checkForNewDay = () => {
+      const lastRefreshDate = localStorage.getItem('lastDashboardRefresh');
+      const currentDate = new Date().toISOString().split('T')[0];
+      
+      if (lastRefreshDate !== currentDate) {
+        // New day detected - force refresh
+        console.log('[Dashboard] New day detected - refreshing data');
+        loadChartData();
+        localStorage.setItem('lastDashboardRefresh', currentDate);
       }
     };
-
-    // Also update the auto-refresh useEffect to refresh more frequently
-    useEffect(() => {
-      loadChartData();
-      
-      // Refresh every 30 seconds to show real-time data
-      const interval = setInterval(() => {
-        loadChartData();
-      }, 30000); // 30 seconds
-
-      return () => clearInterval(interval);
-    }, []);
-
-    // Add a function to check if we need to reset (new day detection)
-    useEffect(() => {
-      const checkForNewDay = () => {
-        const lastRefreshDate = localStorage.getItem('lastDashboardRefresh');
-        const currentDate = new Date().toISOString().split('T')[0];
-        
-        if (lastRefreshDate !== currentDate) {
-          // New day detected - force refresh
-          console.log('[Dashboard] New day detected - refreshing data');
-          loadChartData();
-          localStorage.setItem('lastDashboardRefresh', currentDate);
-        }
-      };
-      
-      // Check every minute if it's a new day
-      const dayCheckInterval = setInterval(checkForNewDay, 60000);
-      
-      // Initial check
-      checkForNewDay();
-      
-      return () => clearInterval(dayCheckInterval);
-    }, []);
+    
+    // Check every minute if it's a new day
+    const dayCheckInterval = setInterval(checkForNewDay, 60000);
+    
+    // Initial check
+    checkForNewDay();
+    
+    return () => clearInterval(dayCheckInterval);
+  }, []);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -275,6 +289,7 @@ export const DashboardPage: React.FC = () => {
               xAxisKey="time"
               title="24-Hour Tag Activity"
               color="#4F46E5"
+              description="Live tag count for the last 24 hours"
             />
           </motion.div>
           

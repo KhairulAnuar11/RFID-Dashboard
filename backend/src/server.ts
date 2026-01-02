@@ -379,7 +379,7 @@ app.get('/api/debug/analytics-check', authenticateToken, async (req, res) => {
       SELECT 
         WEEK(read_time) as week,
         YEAR(read_time) as year,
-        COUNT(*) as reads,
+        COUNT(*) as total_reads,
         COUNT(DISTINCT epc) as unique_tags
       FROM rfid_tags
       WHERE read_time >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 12 WEEK)
@@ -1033,7 +1033,7 @@ app.get('/api/analytics/daily-trends', authenticateToken, async (req, res) => {
       date: row.date instanceof Date 
         ? row.date.toISOString().split('T')[0] 
         : String(row.date),
-      reads: Number(row.reads || 0),
+      reads: Number(row.total_reads || 0),
       unique_tags: Number(row.unique_tags || 0),
       active_devices: Number(row.active_devices || 0),
       avg_rssi: row.avg_rssi ? Number(row.avg_rssi).toFixed(2) : null

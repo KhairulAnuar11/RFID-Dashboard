@@ -1,14 +1,13 @@
-// src/pages/AnalyticsPage.tsx
-// Complete merged version with all existing features + new fixes
-
 import React, { useState, useEffect } from 'react';
 import { Header } from '../components/layout/Header';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
-import { Download, Calendar, TrendingUp, Activity, BarChart3, Zap, MapPin, Award, Signal } from 'lucide-react';
+import { Download, Calendar, TrendingUp, Activity, BarChart3, Zap, MapPin, Award, Signal, PercentIcon } from 'lucide-react';
 import { apiService } from '../services/apiService';
 import { analyticsService } from '../services/analyticsService';
 import { toast } from 'sonner';
 import { motion } from 'motion/react';
+import { TooltipProps } from 'recharts';
+import { ValueType, NameType } from 'recharts/types/component/DefaultTooltipContent';
 
 const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316'];
 
@@ -70,6 +69,18 @@ export const AnalyticsPage: React.FC = () => {
       setIsLoading(false);
     }
   };
+
+  // Custom tooltip component
+  const CustomTooltip = ({ active, payload, label }: TooltipProps<ValueType, NameType>) => {
+  if (active && payload && payload.length) {
+    return (
+      <div className="custom-tooltip">
+        <p>{`${label} : ${payload[0].value}`}</p>
+      </div>
+    );
+  }
+  return null;
+};
 
   // Export handlers for each graph
   const handleExportHourlyPatterns = (format: 'csv' | 'excel') => {
@@ -142,6 +153,33 @@ export const AnalyticsPage: React.FC = () => {
     toast.success(`Assets by location exported as ${format.toUpperCase()}`);
   };
 
+  const handleExportLocationDistribution = (format: 'csv' | 'excel') => {
+    // Calculate location distribution data for export
+    const totalReadsAllLocations = assetsByLocation.reduce(
+      (sum, loc) => sum + loc.total_reads,
+      0
+    );
+    
+    const locationDistributionData = assetsByLocation.map(loc => ({
+      location: loc.location,
+      percentage: totalReadsAllLocations
+        ? Number(((loc.total_reads / totalReadsAllLocations) * 100).toFixed(2))
+        : 0,
+      total_reads: loc.total_reads
+    }));
+    
+    const headers = ['location', 'percentage', 'total_reads'];
+    const filename = `location_distribution_${new Date().toISOString().split('T')[0]}`;
+    
+    if (format === 'csv') {
+      analyticsService.exportGraphToCSV(locationDistributionData, `${filename}.csv`, headers);
+    } else {
+      analyticsService.exportGraphToExcel(locationDistributionData, filename);
+    }
+    
+    toast.success(`Location distribution exported as ${format.toUpperCase()}`);
+  };
+
   const handleExportTopTags = (format: 'csv' | 'excel') => {
     const headers = ['tag_id', 'read_count', 'device_count', 'avg_rssi'];
     const filename = `top_tags_${new Date().toISOString().split('T')[0]}`;
@@ -168,11 +206,11 @@ export const AnalyticsPage: React.FC = () => {
     toast.success(`Device performance exported as ${format.toUpperCase()}`);
   };
 
-    //Location Distribution Logic
-    const totalReadsAllLocations = assetsByLocation.reduce(
+  // Calculate location distribution for pie chart
+  const totalReadsAllLocations = assetsByLocation.reduce(
     (sum, loc) => sum + loc.total_reads,
     0
-    );
+  );
 
   const locationDistribution = assetsByLocation.map(loc => ({
     location: loc.location,
@@ -529,11 +567,19 @@ export const AnalyticsPage: React.FC = () => {
                     textAnchor="end"
                     height={100}
                   />
-                  <YAxis />
+                  <YAxis 
+                    yAxisId="left"
+                    label={{ value: 'Read Count', angle: -90, position: 'insideLeft' }}
+                  />
+                  <YAxis 
+                    yAxisId="right" 
+                    orientation="right"
+                    label={{ value: 'Unique Tags', angle: 90, position: 'insideRight' }}
+                  />
                   <Tooltip />
                   <Legend />
-                  <Bar dataKey="read_count" fill="#8B5CF6" name="Read Count" />
-                  <Bar dataKey="unique_tags" fill="#EC4899" name="Unique Tags" />
+                  <Bar yAxisId="left" dataKey="read_count" fill="#8B5CF6" name="Read Count" />
+                  <Bar yAxisId="right" dataKey="unique_tags" fill="#EC4899" name="Unique Tags" />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -547,14 +593,14 @@ export const AnalyticsPage: React.FC = () => {
             animate={{ opacity: 1, y: 0 }}
             className="space-y-6"
           >
-            {/* Assets by Location */}
+            {/* 3.1 Assets by Location — Bar Graph (Separate Section) */}
             <div className="bg-white rounded-lg border border-gray-200 p-6">
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-3">
                   <MapPin className="size-6 text-green-600" />
                   <div>
-                    <h2 className="text-xl font-semibold text-gray-900">Assets by Location</h2>
-                    <p className="text-sm text-gray-600">Tag activity by reader location (Last 30 days)</p>
+                    <h2 className="text-xl font-semibold text-gray-900">Assets by Location - Reader Activity</h2>
+                    <p className="text-sm text-gray-600">Total tag reads by location (entire database)</p>
                   </div>
                 </div>
                 <div className="flex gap-2">
@@ -575,42 +621,119 @@ export const AnalyticsPage: React.FC = () => {
                 </div>
               </div>
               
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <ResponsiveContainer width="100%" height={400}>
-                  <BarChart data={assetsByLocation.slice(0, 10)}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis 
-                      dataKey="location" 
-                      angle={-45}
-                      textAnchor="end"
-                      height={100}
-                    />
-                    <YAxis />
-                    <Tooltip />
-                    <Legend />
-                    <Bar dataKey="total_reads" fill="#10B981" name="Total Reads" />
-                  </BarChart>
-                </ResponsiveContainer>
-                
-                <ResponsiveContainer width="100%" height={400}>
-                  <PieChart>
-                    <Pie
-                      data={assetsByLocation.slice(0, 8)}
-                      dataKey="unique_tags"
-                      nameKey="location"
-                      cx="50%"
-                      cy="50%"
-                      outerRadius={120}
-                      label={(entry) => entry.location}
-                    >
-                      {assetsByLocation.slice(0, 8).map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <Tooltip />
-                    <Legend />
-                  </PieChart>
-                </ResponsiveContainer>
+              <ResponsiveContainer width="100%" height={400}>
+                <BarChart data={assetsByLocation}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis 
+                    dataKey="location" 
+                    label={{ value: 'Location', position: 'insideBottom', offset: -5 }}
+                    angle={-45}
+                    textAnchor="end"
+                    height={80}
+                  />
+                  <YAxis 
+                    label={{ value: 'Total Tag Reads', angle: -90, position: 'insideLeft' }}
+                  />
+                  <Tooltip 
+                    formatter={(value) => [value, 'Total Reads']}
+                    labelFormatter={(label) => `Location: ${label}`}
+                  />
+                  <Legend />
+                  <Bar 
+                    dataKey="total_reads" 
+                    fill="#3B82F6" 
+                    name="Reader"
+                    radius={[4, 4, 0, 0]}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* 3.2 Percentage by Location — Pie Chart (Separate Section) */}
+            <div className="bg-white rounded-lg border border-gray-200 p-6">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <PercentIcon className="size-6 text-black-600" />
+                  <div>
+                    <h2 className="text-xl font-semibold text-gray-900">Location Distribution - Percentage</h2>
+                    <p className="text-sm text-gray-600">Read percentage by location (dynamically calculated)</p>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => handleExportLocationDistribution('csv')}
+                    className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+                  >
+                    <Download className="size-4" />
+                    CSV
+                  </button>
+                  <button
+                    onClick={() => handleExportLocationDistribution('excel')}
+                    className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                  >
+                    <Download className="size-4" />
+                    Excel
+                  </button>
+                </div>
+              </div>
+              
+              <ResponsiveContainer width="100%" height={400}>
+                <PieChart>
+                  <Pie
+                    data={locationDistribution}
+                    dataKey="percentage"
+                    nameKey="location"
+                    cx="50%"
+                    cy="50%"
+                    outerRadius={140}
+                    label={({ location, percentage }) => `${location} – ${percentage}%`}
+                    labelLine={true}
+                  >
+                    {locationDistribution.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip
+                    // 1. If you have a formatter, type it strictly:
+                    formatter={(value: ValueType, name: "Percentage") => [value, name]}
+                    
+                    // 2. Type the content props to match the expected literal "Percentage"
+                    content={(props: TooltipProps<ValueType, "Percentage">) => {
+                      const { active, payload } = props;
+                      
+                      if (active && payload && payload.length) {
+                        // Accessing the raw data object
+                        const data = payload[0].payload; 
+                        
+                        return (
+                          <div className="bg-white p-3 border border-gray-200 rounded-lg shadow-lg">
+                            <p className="font-semibold text-gray-900">Location: {data.location}</p>
+                            <p className="text-gray-700">Percentage: {data.percentage}%</p>
+                            <p className="text-gray-700">Total Reads: {data.total_reads?.toLocaleString()}</p>
+                          </div>
+                        );
+                      }
+                      return null;
+                    }}
+                  />
+                  <Legend 
+                    formatter={(value, entry, index) => (
+                      <span className="text-gray-700">
+                        {locationDistribution[index]?.location}
+                      </span>
+                    )}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+              
+              {/* Display calculation formula */}
+              <div className="mt-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
+                <p className="text-sm text-gray-600">
+                  <span className="font-semibold">Calculation:</span> Percentage = (total_reads_per_location / total_reads_all_locations) × 100
+                </p>
+                <p className="text-sm text-gray-600 mt-1">
+                  <span className="font-semibold">Total reads across all locations:</span> {totalReadsAllLocations.toLocaleString()}
+                </p>
               </div>
             </div>
 
