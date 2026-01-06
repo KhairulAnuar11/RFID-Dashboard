@@ -10,6 +10,14 @@ import { apiService } from '../services/apiService';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'motion/react';
 import { User } from '../types';
+const tabColorClasses: Record<string, string> = {
+  indigo: 'bg-indigo-100 text-indigo-700 border-indigo-600',
+  green: 'bg-green-100 text-green-700 border-green-600',
+  blue: 'bg-blue-100 text-blue-700 border-blue-600',
+  purple: 'bg-purple-100 text-purple-700 border-purple-600',
+  orange: 'bg-orange-100 text-orange-700 border-orange-600',
+};
+
 
 type TabId = 'mqtt' | 'system' | 'dashboard' | 'preferences' | 'users';
 
@@ -64,6 +72,19 @@ export const SettingsPage: React.FC = () => {
   const [editingUser, setEditingUser] = useState<User | null>(null);
   
   const [isSaving, setIsSaving] = useState(false);
+  const [backendAvailable, setBackendAvailable] = useState(true);
+
+  const loadUsers = async () => {
+    try {
+      const resp = await apiService.getUsers();
+      if (resp.success && resp.data) {
+        setUsers(resp.data);
+      }
+    } catch (err) {
+      console.error('[Settings] Error loading users:', err);
+      toast.error('Failed to load users');
+    }
+  };
 
   // Load all configurations on mount
   useEffect(() => {
@@ -73,55 +94,51 @@ export const SettingsPage: React.FC = () => {
     }
   }, []);
 
-  const loadConfigurations = async () => {
-    try {
-      // Load dashboard settings
-      const dashResp = await apiService.getDashboardSettings();
-      console.log('[Settings] Dashboard settings response:', dashResp);
-      if (dashResp.success && dashResp.data) {
-        setDashboardSettingsState(dashResp.data);
-      }
+ const loadConfigurations = async () => {
+  try {
+    // Dashboard settings
+    const dashResp = await apiService.getDashboardSettings();
+    if (dashResp.error === 'BACKEND_OFFLINE') {
+      setBackendAvailable(false);
+      return;
+    }
+    if (dashResp.success && dashResp.data) {
+      setDashboardSettingsState(dashResp.data);
+    }
 
-      // Load system config (admin only)
-      if (isAdmin()) {
-        setIsLoadingConfig(true);
-        const sysResp = await apiService.getSystemConfig();
-        console.log('[Settings] System config response:', sysResp);
-        if (sysResp.success && sysResp.data) {
-          setSystemConfig(sysResp.data);
-          console.log('[Settings] System config loaded:', sysResp.data);
-        } else {
-          console.error('[Settings] System config error:', sysResp.error);
-          toast.error('Failed to load system config: ' + sysResp.error);
-        }
-        setIsLoadingConfig(false);
+    // System config (admin only)
+    if (isAdmin()) {
+      setIsLoadingConfig(true);
+      const sysResp = await apiService.getSystemConfig();
+      if (sysResp.error === 'BACKEND_OFFLINE') {
+        setBackendAvailable(false);
+        return;
       }
-
-      // Load user preferences
-      setIsLoadingPrefs(true);
-      const prefResp = await apiService.getUserPreferences();
-      console.log('[Settings] User preferences response:', prefResp);
-      if (prefResp.success && prefResp.data) {
-        setUserPrefs(prefResp.data);
-        console.log('[Settings] User preferences loaded:', prefResp.data);
-      } else {
-        console.error('[Settings] User preferences error:', prefResp.error);
+      if (sysResp.success && sysResp.data) {
+        setSystemConfig(sysResp.data);
       }
-      setIsLoadingPrefs(false);
-    } catch (error) {
-      console.error('[Settings] Failed to load configurations:', error);
-      toast.error('Failed to load settings');
       setIsLoadingConfig(false);
-      setIsLoadingPrefs(false);
     }
-  };
 
-  const loadUsers = async () => {
-    const response = await apiService.getUsers();
-    if (response.success && response.data) {
-      setUsers(response.data);
+    // User preferences
+    setIsLoadingPrefs(true);
+    const prefResp = await apiService.getUserPreferences();
+    if (prefResp.error === 'BACKEND_OFFLINE') {
+      setBackendAvailable(false);
+      return;
     }
-  };
+    if (prefResp.success && prefResp.data) {
+      setUserPrefs(prefResp.data);
+    }
+    setIsLoadingPrefs(false);
+
+  } catch (error) {
+    console.error('[Settings] Failed to load configurations:', error);
+    toast.error('Failed to load settings');
+    setIsLoadingConfig(false);
+    setIsLoadingPrefs(false);
+  }
+};
 
   // Save handlers for each tab
   const handleSaveMQTT = async () => {
@@ -321,7 +338,7 @@ export const SettingsPage: React.FC = () => {
                   onClick={() => setActiveTab(tab.id)}
                   className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all text-left ${
                     activeTab === tab.id
-                      ? `bg-${tab.color}-100 text-${tab.color}-700 border-l-4 border-${tab.color}-600`
+                      ? `${tabColorClasses[tab.color]} border-l-4`
                       : 'text-gray-700 hover:bg-gray-100'
                   }`}
                 >
@@ -332,6 +349,8 @@ export const SettingsPage: React.FC = () => {
             })}
           </nav>
         </div>
+
+
 
         {/* Main Content Area */}
         <div className="flex-1 p-8 overflow-y-auto">
@@ -420,7 +439,7 @@ export const SettingsPage: React.FC = () => {
             <div className="flex gap-4 mt-6 max-w-3xl">
               <button
                 onClick={handleSave}
-                disabled={isSaving}
+                disabled={isSaving || !backendAvailable}
                 className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Save className="size-4" />

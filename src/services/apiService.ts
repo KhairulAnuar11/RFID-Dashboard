@@ -8,6 +8,7 @@ import { RFIDTag, Device, User, DashboardStats } from '../types';
 
 // Fetch from window.location for dynamic API URL
 const API_URL = `${window.location.protocol}//${window.location.hostname}:3001/api`;
+const BACKEND_OPTIONAL = import.meta.env.VITE_BACKEND_OPTIONAL === 'true';
 
 interface APIResponse<T = any> {
   success: boolean;
@@ -28,52 +29,52 @@ class APIService {
   /**
    * Generic HTTP request handler
    */
-  private async request<T>(
-    endpoint: string,
-    options: RequestInit = {}
-  ): Promise<APIResponse<T>> {
-    const token = this.getAuthToken();
-    const url = `${this.baseURL}${endpoint}`;
+private async request<T>(
+  endpoint: string,
+  options: RequestInit = {}
+): Promise<APIResponse<T>> {
+  const token = this.getAuthToken();
+  const url = `${this.baseURL}${endpoint}`;
 
-    const config: RequestInit = {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+
+    const response = await fetch(url, {
       ...options,
       headers: {
         'Content-Type': 'application/json',
-        ...(token && { 'Authorization': `Bearer ${token}` }),
-        ...options.headers,
+        ...(token && { Authorization: `Bearer ${token}` }),
       },
-    };
+      signal: controller.signal,
+    });
 
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    clearTimeout(timeoutId);
 
-      const response = await fetch(url, {
-        ...config,
-        signal: controller.signal,
-      });
+    const data = await response.json();
 
-      clearTimeout(timeoutId);
+    if (!response.ok) {
+      return { success: false, error: data.message };
+    }
 
-      const data = await response.json();
+    return { success: true, data: data.data ?? data };
 
-      if (!response.ok) {
-        throw new Error(data.message || `HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      return {
-        success: true,
-        data: data.data || data,
-        message: data.message,
-      };
-    } catch (error: any) {
-      console.error(`[API] Request failed: ${endpoint}`, error);
+  } catch (error: any) {
+    // 🔥 IMPORTANT: Handle backend-down case
+    if (error.name === 'TypeError') {
+      console.warn('[API] Backend unavailable');
       return {
         success: false,
-        error: error.message || 'Network request failed',
+        error: 'BACKEND_OFFLINE'
       };
     }
+
+    return {
+      success: false,
+      error: error.message || 'Request failed'
+    };
   }
+}
 
   /**
    * GET request
@@ -390,6 +391,7 @@ class APIService {
   }
 
   // ==================== User Management API ====================
+
 
   async getUsers(): Promise<APIResponse<User[]>> {
     return this.get('/users');
