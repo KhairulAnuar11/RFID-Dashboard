@@ -34,12 +34,40 @@ export const HelpPage: React.FC = () => {
     setHelpfulCounts(savedCounts);
   }, []);
 
-  const sections = [
-    { id: 'guide', label: 'User Guide', icon: Book, color: 'text-blue-600', bgColor: 'bg-blue-50' },
-    { id: 'faq', label: 'FAQ', icon: HelpCircle, color: 'text-green-600', bgColor: 'bg-green-50' },
-    { id: 'troubleshooting', label: 'Troubleshooting', icon: Zap, color: 'text-orange-600', bgColor: 'bg-orange-50' },
-    { id: 'contact', label: 'Contact Support', icon: Mail, color: 'text-purple-600', bgColor: 'bg-purple-50' },
-  ];
+const sections = [
+  { 
+    id: 'guide', 
+    label: 'User Guide', 
+    icon: Book, 
+    color: 'text-blue-600', 
+    bgColor: 'bg-blue-50',
+    description: 'Interactive tutorials and guides' 
+  },
+  { 
+    id: 'faq', 
+    label: 'FAQ', 
+    icon: HelpCircle, 
+    color: 'text-green-600', 
+    bgColor: 'bg-green-50',
+    description: 'Frequently asked questions and answers' 
+  },
+  { 
+    id: 'troubleshooting', 
+    label: 'Troubleshooting', 
+    icon: Zap, 
+    color: 'text-orange-600', 
+    bgColor: 'bg-orange-50',
+    description: 'Diagnose and fix common issues' 
+  },
+  { 
+    id: 'contact', 
+    label: 'Contact Support', 
+    icon: Mail, 
+    color: 'text-purple-600', 
+    bgColor: 'bg-purple-50',
+    description: 'Get help from our support team' 
+  },
+];
 
   const guideSteps = [
     {
@@ -276,42 +304,40 @@ export const HelpPage: React.FC = () => {
               </h3>
               
               <nav className="space-y-2">
-                {sections.map((section) => {
-                  const Icon = section.icon;
-                  return (
-                    <button
-                      key={section.id}
-                      onClick={() => setActiveSection(section.id)}
-                      className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-300 transform hover:scale-[1.02] ${
+              {sections.map((section) => {
+                const Icon = section.icon;
+                return (
+                  <button
+                    key={section.id}
+                    onClick={() => setActiveSection(section.id)}
+                    className={`w-full flex items-start gap-3 px-4 py-4 rounded-xl transition-all duration-300 transform hover:scale-[1.02] ${
+                      activeSection === section.id
+                        ? `${section.bgColor} ${section.color} shadow-md border-l-4 border-l-current`
+                        : 'text-gray-700 hover:bg-gray-50 hover:shadow border-l-4 border-l-transparent'
+                    }`}
+                  >
+                    <div className={`p-2 rounded-lg ${
+                      activeSection === section.id
+                        ? `${section.bgColor.replace('50', '100')}`
+                        : 'bg-gray-100'
+                    }`}>
+                      <Icon className={`size-5 ${
                         activeSection === section.id
-                          ? `${section.bgColor} ${section.color} shadow-md`
-                          : 'text-gray-700 hover:bg-gray-50 hover:shadow'
-                      }`}
-                    >
-                      <Icon className="size-5" />
-                      <span className="font-medium">{section.label}</span>
-                      {activeSection === section.id && (
-                        <div className="ml-auto size-2 rounded-full bg-current animate-pulse" />
-                      )}
-                    </button>
-                  );
-                })}
-              </nav>
-
-              {/* Quick Stats */}
-              <div className="mt-6 pt-6 border-t border-gray-200">
-                <h4 className="text-sm font-medium text-gray-700 mb-3">Help Center Stats</h4>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="p-3 bg-blue-50 rounded-lg">
-                    <p className="text-2xl font-bold text-blue-600">{faqs.length}</p>
-                    <p className="text-xs text-gray-600">Articles</p>
-                  </div>
-                  <div className="p-3 bg-green-50 rounded-lg">
-                    <p className="text-2xl font-bold text-green-600">{Object.keys(helpfulCounts).length}</p>
-                    <p className="text-xs text-gray-600">Helpful Votes</p>
-                  </div>
-                </div>
-              </div>
+                          ? section.color
+                          : 'text-gray-600'
+                      }`} />
+                    </div>
+                    <div className="flex-1 text-left">
+                      <div className="font-medium text-gray-900">{section.label}</div>
+                      <div className="text-sm text-gray-600 mt-0.5">{section.description}</div>
+                    </div>
+                    {activeSection === section.id && (
+                      <div className="mt-2 size-2 rounded-full bg-current animate-pulse" />
+                    )}
+                  </button>
+                );
+              })}
+            </nav>
             </div>
           </div>
 

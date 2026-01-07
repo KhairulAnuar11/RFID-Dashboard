@@ -120,12 +120,29 @@ export const RFIDProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     return () => clearInterval(interval);
   }, []);
 
+  const normalizeDevice = (d: any): Device => ({
+  id: d.id,
+  name: d.name,
+  type: d.type,
+  status: d.status,
+  ipAddress: d.ip_address,
+  macAddress: d.mac_address,
+  location: d.location,
+  zone: d.zone,
+  signalStrength: d.signal_strength,
+  tagsReadToday: d.tags_read_today,
+  lastHeartbeat: d.last_heartbeat,
+  uptime: d.uptime,
+});
+
+
   const loadInitialData = async () => {
     try {
       // Load devices from API
       const devicesResponse = await apiService.getDevices();
       if (devicesResponse.success && devicesResponse.data) {
-        setDevices(devicesResponse.data);
+        const normalizedDevices = devicesResponse.data.map(normalizeDevice);
+        setDevices(normalizedDevices);
       }
 
       // Load dashboard stats

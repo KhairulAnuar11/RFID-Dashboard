@@ -15,6 +15,9 @@ export const AnalyticsPage: React.FC = () => {
   // Chart data states
   const [hourlyPatterns, setHourlyPatterns] = useState<any[]>([]);
   const [dailyTrends, setDailyTrends] = useState<any[]>([]);
+  useEffect(() => {
+  analyticsService.getDailyTrends(30).then(setDailyTrends);
+    }, []);
   const [weeklyTrends, setWeeklyTrends] = useState<any[]>([]);
   const [antennaStats, setAntennaStats] = useState<any[]>([]);
   const [assetsByLocation, setAssetsByLocation] = useState<any[]>([]);
@@ -69,6 +72,12 @@ export const AnalyticsPage: React.FC = () => {
       setIsLoading(false);
     }
   };
+
+  const formatDailyDate = (dateStr: string) => {
+  // dateStr = "YYYY-MM-DD"
+  const [year, month, day] = dateStr.split('-');
+  return `${day}/${month}/${year}`;
+};
 
   // Custom tooltip component
   const CustomTooltip = ({ active, payload, label }: TooltipProps<ValueType, NameType>) => {
@@ -335,86 +344,91 @@ export const AnalyticsPage: React.FC = () => {
               </ResponsiveContainer>
             </div>
 
-            {/* Daily Activity Trends */}
-            <div className="bg-white rounded-lg border border-gray-200 p-6">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-3">
-                  <Calendar className="size-6 text-purple-600" />
-                  <div>
-                    <h2 className="text-xl font-semibold text-gray-900">Daily Activity Trends</h2>
-                    <p className="text-sm text-gray-600">Historical + live data (UTC dates)</p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <select
-                    value={selectedDays}
-                    onChange={(e) => setSelectedDays(Number(e.target.value))}
-                    className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
-                  >
-                    <option value={7}>Last 7 Days</option>
-                    <option value={30}>Last 30 Days</option>
-                    <option value={60}>Last 60 Days</option>
-                    <option value={90}>Last 90 Days</option>
-                  </select>
-                  <button
-                    onClick={() => handleExportDailyTrends('csv')}
-                    className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
-                  >
-                    <Download className="size-4" />
-                    CSV
-                  </button>
-                  <button
-                    onClick={() => handleExportDailyTrends('excel')}
-                    className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
-                  >
-                    <Download className="size-4" />
-                    Excel
-                  </button>
-                </div>
-              </div>
-              
-              <ResponsiveContainer width="100%" height={400}>
-                <LineChart data={dailyTrends}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis 
-                    dataKey="date" 
-                    label={{ value: 'Date (UTC)', position: 'insideBottom', offset: -5 }}
-                    angle={-45}
-                    textAnchor="end"
-                    height={80}
-                  />
-                  <YAxis 
-                    yAxisId="left"
-                    label={{ value: 'Total Reads', angle: -90, position: 'insideLeft' }}
-                  />
-                  <YAxis 
-                    yAxisId="right" 
-                    orientation="right"
-                    label={{ value: 'Unique Tags', angle: 90, position: 'insideRight' }}
-                  />
-                  <Tooltip />
-                  <Legend />
-                  <Line 
-                    yAxisId="left"
-                    type="monotone" 
-                    dataKey="reads" 
-                    stroke="#8B5CF6" 
-                    strokeWidth={2}
-                    name="Total Reads"
-                    dot={{ r: 3 }}
-                  />
-                  <Line 
-                    yAxisId="right"
-                    type="monotone" 
-                    dataKey="unique_tags" 
-                    stroke="#F59E0B" 
-                    strokeWidth={2}
-                    name="Unique Tags"
-                    dot={{ r: 3 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
+{/* Daily Activity Trends */}
+<div className="bg-white rounded-lg border border-gray-200 p-6">
+  <div className="flex items-center justify-between mb-4">
+    <div className="flex items-center gap-3">
+      <Calendar className="size-6 text-purple-600" />
+      <div>
+        <h2 className="text-xl font-semibold text-gray-900">Daily Activity Trends</h2>
+        {/* Updated to show correct format */}
+        <p className="text-sm text-gray-600">Historical + live data (Local time - D/MM/YYYY format)</p>
+      </div>
+    </div>
+    <div className="flex items-center gap-3">
+      <select
+        value={selectedDays}
+        onChange={(e) => setSelectedDays(Number(e.target.value))}
+        className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+      >
+        <option value={7}>Last 7 Days</option>
+        <option value={30}>Last 30 Days</option>
+        <option value={60}>Last 60 Days</option>
+        <option value={90}>Last 90 Days</option>
+      </select>
+      <button
+        onClick={() => handleExportDailyTrends('csv')}
+        className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+      >
+        <Download className="size-4" />
+        CSV
+      </button>
+      <button
+        onClick={() => handleExportDailyTrends('excel')}
+        className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+      >
+        <Download className="size-4" />
+        Excel
+      </button>
+    </div>
+  </div>
+  
+  <ResponsiveContainer width="100%" height={400}>
+    <LineChart data={dailyTrends}>
+      <CartesianGrid strokeDasharray="3 3" />
+      <XAxis
+        dataKey="date"
+        tickFormatter={formatDailyDate}
+        label={{ position: 'insideBottom', offset: -5 }}
+        angle={-45}
+        textAnchor="end"
+        height={80}
+      />
+      <YAxis 
+        yAxisId="left"
+        label={{ value: 'Total Reads', angle: -90, position: 'insideLeft' }}
+      />
+      <YAxis 
+        yAxisId="right" 
+        orientation="right"
+        label={{ value: 'Unique Tags', angle: 90, position: 'insideRight' }}
+      />
+      <Tooltip
+        labelFormatter={(label) => formatDailyDate(String(label))}
+      />
+
+      <Legend />
+      <Line 
+        yAxisId="left"
+        type="monotone" 
+        dataKey="reads" 
+        stroke="#8B5CF6" 
+        strokeWidth={2}
+        name="Total Reads"
+        dot={{ r: 3 }}
+      />
+      <Line 
+        yAxisId="right"
+        type="monotone" 
+        dataKey="unique_tags" 
+        stroke="#F59E0B" 
+        strokeWidth={2}
+        name="Unique Tags"
+        dot={{ r: 3 }}
+      />
+    </LineChart>
+  </ResponsiveContainer>
+</div>
 
             {/* Weekly Activity Trends */}
             <div className="bg-white rounded-lg border border-gray-200 p-6">

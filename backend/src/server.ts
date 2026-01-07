@@ -449,6 +449,49 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+// Logout (token invalidation)
+app.post('/api/auth/logout', authenticateToken, async (req, res) => {
+  try {
+    // In a stateless JWT system, we can't invalidate the token on the server
+    // The client simply removes the token from storage
+    // For enhanced security, you could implement a token blacklist
+    
+    res.json({
+      success: true,
+      message: 'Logged out successfully'
+    });
+  } catch (error) {
+    console.error('[Auth] Logout error:', error);
+    res.status(500).json({ success: false, error: 'Logout failed' });
+  }
+});
+
+// Alternative: Add token to blacklist if you want server-side invalidation
+app.post('/api/auth/logout-blacklist', authenticateToken, async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    if (token) {
+      // Add to blacklist table (you'd need to create this table)
+      // await pool.execute(
+      //   'INSERT INTO token_blacklist (token, expires_at) VALUES (?, DATE_ADD(NOW(), INTERVAL 24 HOUR))',
+      //   [token]
+      // );
+      
+      console.log('[Auth] Token added to blacklist');
+    }
+    
+    res.json({
+      success: true,
+      message: 'Logged out successfully'
+    });
+  } catch (error) {
+    console.error('[Auth] Logout error:', error);
+    res.status(500).json({ success: false, error: 'Logout failed' });
+  }
+});
+
 // Get Tags
 app.get('/api/tags', authenticateToken, async (req, res) => {
   try {

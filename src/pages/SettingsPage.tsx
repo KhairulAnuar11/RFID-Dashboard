@@ -1,8 +1,11 @@
 // src/pages/SettingsPage.tsx
-// Complete merged settings page with MQTT, System Config, Dashboard, User Preferences, and User Management
 
 import React, { useState, useEffect } from 'react';
-import { Save, Database, Wifi, Users, Plus, Edit, Trash2, X, Power, RefreshCw, Settings, User as UserIcon, Palette } from 'lucide-react';
+import { 
+  Save, Database, Wifi, Users, Plus, Edit, Trash2, X, Power, 
+  RefreshCw, Settings, User as UserIcon, Palette, Zap, AlertCircle,
+  CheckCircle, MessageSquare, Mail, ChevronRight
+} from 'lucide-react';
 import { Header } from '../components/layout/Header';
 import { useRFID } from '../context/RFIDContext';
 import { useAuth } from '../context/AuthContext';
@@ -10,17 +13,8 @@ import { apiService } from '../services/apiService';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'motion/react';
 import { User } from '../types';
-const tabColorClasses: Record<string, string> = {
-  indigo: 'bg-indigo-100 text-indigo-700 border-indigo-600',
-  green: 'bg-green-100 text-green-700 border-green-600',
-  blue: 'bg-blue-100 text-blue-700 border-blue-600',
-  purple: 'bg-purple-100 text-purple-700 border-purple-600',
-  orange: 'bg-orange-100 text-orange-700 border-orange-600',
-};
 
-
-type TabId = 'mqtt' | 'system' | 'dashboard' | 'preferences' | 'users';
-
+// Define SystemConfig type if not in types
 interface SystemConfig {
   db_connection_limit: number;
   mqtt_reconnect_period_ms: number;
@@ -40,6 +34,8 @@ interface UserPreferences {
   default_map_zoom: number;
   desktop_notifications: boolean;
 }
+
+type TabId = 'mqtt' | 'system' | 'dashboard' | 'preferences' | 'users';
 
 export const SettingsPage: React.FC = () => {
   const { config, updateConfig, isConnected, connectToMQTT, disconnectFromMQTT, connectionStatus, connectionMessage, dashboardSettings, updateDashboardSettings } = useRFID();
@@ -141,26 +137,36 @@ export const SettingsPage: React.FC = () => {
 };
 
   // Save handlers for each tab
-  const handleSaveMQTT = async () => {
-    setIsSaving(true);
-    try {
-      // Update local config
-      updateConfig({ mqttConfig });
-      
-      // Save to backend
-      const response = await apiService.saveMQTTConfig(mqttConfig);
-      if (response.success) {
-        toast.success('MQTT configuration saved successfully!');
-      } else {
-        toast.error('Failed to save MQTT config', { description: response.error });
-      }
-    } catch (error) {
-      console.error('[Settings] MQTT save error', error);
-      toast.error('Failed to save MQTT configuration');
-    } finally {
-      setIsSaving(false);
+const handleSaveMQTT = async () => {
+  setIsSaving(true);
+  try {
+    // Update local config
+    updateConfig({ mqttConfig });
+    
+    // Save to backend - Use the correct API method
+    const response = await apiService.saveMQTTConfig({
+      broker: mqttConfig.broker,
+      port: mqttConfig.port,
+      protocol: mqttConfig.protocol,
+      username: mqttConfig.username,
+      password: mqttConfig.password,
+      topics: mqttConfig.topics,
+      qos: 1,
+      enabled: true
+    });
+    
+    if (response.success) {
+      toast.success('MQTT configuration saved successfully!');
+    } else {
+      toast.error('Failed to save MQTT config', { description: response.error });
     }
-  };
+  } catch (error) {
+    console.error('[Settings] MQTT save error', error);
+    toast.error('Failed to save MQTT configuration');
+  } finally {
+    setIsSaving(false);
+  }
+};
 
   const handleSaveSystem = async () => {
     if (!systemConfig) return;
@@ -284,13 +290,48 @@ export const SettingsPage: React.FC = () => {
     }
   };
 
-  // Tab configuration
+  // Tab configuration with colors and icons matching HelpPage style
   const tabs = [
-    { id: 'mqtt' as TabId, label: 'MQTT Settings', icon: Wifi, color: 'indigo' },
-    ...(isAdmin() ? [{ id: 'system' as TabId, label: 'System Config', icon: Settings, color: 'green' }] : []),
-    { id: 'dashboard' as TabId, label: 'Dashboard', icon: Database, color: 'blue' },
-    { id: 'preferences' as TabId, label: 'My Preferences', icon: UserIcon, color: 'purple' },
-    ...(isAdmin() ? [{ id: 'users' as TabId, label: 'User Management', icon: Users, color: 'orange' }] : [])
+    { 
+      id: 'mqtt' as TabId, 
+      label: 'MQTT Settings', 
+      icon: Wifi, 
+      color: 'text-blue-600', 
+      bgColor: 'bg-blue-50',
+      description: 'Configure MQTT broker connection'
+    },
+    ...(isAdmin() ? [{
+      id: 'system' as TabId, 
+      label: 'System Config', 
+      icon: Settings, 
+      color: 'text-green-600', 
+      bgColor: 'bg-green-50',
+      description: 'Global system settings'
+    }] : []),
+    { 
+      id: 'dashboard' as TabId, 
+      label: 'Dashboard', 
+      icon: Database, 
+      color: 'text-indigo-600', 
+      bgColor: 'bg-indigo-50',
+      description: 'Dashboard behavior settings'
+    },
+    { 
+      id: 'preferences' as TabId, 
+      label: 'My Preferences', 
+      icon: UserIcon, 
+      color: 'text-purple-600', 
+      bgColor: 'bg-purple-50',
+      description: 'Personalize your experience'
+    },
+    ...(isAdmin() ? [{
+      id: 'users' as TabId, 
+      label: 'User Management', 
+      icon: Users, 
+      color: 'text-orange-600', 
+      bgColor: 'bg-orange-50',
+      description: 'Manage user accounts'
+    }] : [])
   ];
 
   const getConnectionStatusColor = () => {
@@ -323,139 +364,305 @@ export const SettingsPage: React.FC = () => {
   };
 
   return (
-    <div className="flex-1 flex flex-col bg-gray-50">
+    <div className="flex-1 flex flex-col bg-gradient-to-br from-gray-50 to-blue-50">
       <Header title="Settings & Configuration" />
       
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar Navigation */}
-        <div className="w-96 border-r border-gray-200 bg-white overflow-y-auto">
-          <nav className="p-4 space-y-1">
-            {tabs.map((tab) => {
-              const Icon = tab.icon;
-              return (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all text-left ${
-                    activeTab === tab.id
-                      ? `${tabColorClasses[tab.color]} border-l-4`
-                      : 'text-gray-700 hover:bg-gray-100'
-                  }`}
-                >
-                  <Icon className="size-5 flex-shrink-0" />
-                  <span className="font-medium">{tab.label}</span>
-                </button>
-              );
-            })}
-          </nav>
-        </div>
-
-
-
-        {/* Main Content Area */}
-        <div className="flex-1 p-8 overflow-y-auto">
-          {/* MQTT Settings Tab */}
-          {activeTab === 'mqtt' && (
-            <MQTTSettingsTab
-              mqttConfig={mqttConfig}
-              setMqttConfig={setMqttConfig}
-              isConnected={isConnected}
-              isConnecting={isConnecting}
-              connectionStatus={connectionStatus}
-              connectionMessage={connectionMessage}
-              getConnectionStatusColor={getConnectionStatusColor}
-              handleMQTTConnect={handleMQTTConnect}
-              handleMQTTDisconnect={handleMQTTDisconnect}
-              handleTestConnection={handleTestConnection}
-            />
-          )}
-
-          {/* System Configuration Tab (Admin Only) */}
-          {activeTab === 'system' && isAdmin() && (
-            <>
-              {isLoadingConfig ? (
-                <div className="flex items-center justify-center py-12">
-                  <div className="text-center">
-                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto mb-4"></div>
-                    <p className="text-gray-600">Loading system configuration...</p>
-                  </div>
-                </div>
-              ) : systemConfig ? (
-                <SystemConfigTab
-                  systemConfig={systemConfig}
-                  setSystemConfig={setSystemConfig}
-                />
-              ) : (
-                <div className="bg-white rounded-lg border border-gray-200 p-6 max-w-3xl">
-                  <p className="text-red-600">Failed to load system configuration. Please try refreshing the page.</p>
-                </div>
-              )}
-            </>
-          )}
-
-          {/* Dashboard Settings Tab */}
-          {activeTab === 'dashboard' && (
-            <DashboardSettingsTab
-              dashboardSettings={dashboardSettingsState}
-              setDashboardSettings={setDashboardSettingsState}
-            />
-          )}
-
-          {/* User Preferences Tab */}
-          {activeTab === 'preferences' && (
-            <>
-              {isLoadingPrefs ? (
-                <div className="flex items-center justify-center py-12">
-                  <div className="text-center">
-                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600 mx-auto mb-4"></div>
-                    <p className="text-gray-600">Loading your preferences...</p>
-                  </div>
-                </div>
-              ) : userPrefs ? (
-                <UserPreferencesTab
-                  userPrefs={userPrefs}
-                  setUserPrefs={setUserPrefs}
-                />
-              ) : (
-                <div className="bg-white rounded-lg border border-gray-200 p-6 max-w-3xl">
-                  <p className="text-red-600">Failed to load preferences. Please try refreshing the page.</p>
-                </div>
-              )}
-            </>
-          )}
-
-          {/* User Management Tab (Admin Only) */}
-          {activeTab === 'users' && isAdmin() && (
-            <UserManagementTab
-              users={users}
-              handleAddUser={handleAddUser}
-              handleEditUser={handleEditUser}
-              handleDeleteUser={handleDeleteUser}
-            />
-          )}
-
-          {/* Save Button (for all tabs except user management) */}
-          {activeTab !== 'users' && (
-            <div className="flex gap-4 mt-6 max-w-3xl">
-              <button
-                onClick={handleSave}
-                disabled={isSaving || !backendAvailable}
-                className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Save className="size-4" />
-                {isSaving ? 'Saving...' : 'Save Changes'}
-              </button>
-              <button 
-                onClick={() => {
-                  loadConfigurations();
-                  toast.info('Changes discarded');
-                }}
-                className="px-6 py-3 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
-              >
-                Cancel
-              </button>
+      <div className="flex-1 p-6 md:p-8 overflow-y-auto">
+        {/* Main Content Grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+          {/* Interactive Sidebar - STANDARDIZED TO MATCH HELP PAGE */}
+          <div className="lg:col-span-1">
+            <div className="bg-white/80 backdrop-blur-sm rounded-xl border border-gray-200/50 p-4 shadow-sm sticky top-4">
+              <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                <Settings className="size-5" />
+                Settings Center
+              </h3>
+              
+              <nav className="space-y-2">
+                {tabs.map((tab) => {
+                  const Icon = tab.icon;
+                  return (
+                    <button
+                      key={tab.id}
+                      onClick={() => setActiveTab(tab.id)}
+                      className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-300 transform hover:scale-[1.02] ${
+                        activeTab === tab.id
+                          ? `${tab.bgColor} ${tab.color} shadow-md`
+                          : 'text-gray-700 hover:bg-gray-50 hover:shadow'
+                      }`}
+                    >
+                      <Icon className="size-5" />
+                      <div className="flex-1 text-left">
+                        <span className="font-medium block">{tab.label}</span>
+                        <span className="text-xs text-gray-500 mt-0.5 block">
+                          {tab.description}
+                        </span>
+                      </div>
+                      {activeTab === tab.id && (
+                        <div className="ml-auto size-2 rounded-full bg-current animate-pulse" />
+                      )}
+                    </button>
+                  );
+                })}
+              </nav>
             </div>
-          )}
+          </div>
+
+          {/* Main Content Area */}
+          <div className="lg:col-span-3">
+            {/* MQTT Settings Tab */}
+            {activeTab === 'mqtt' && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm section-content"
+              >
+                <div className="flex items-center justify-between mb-6">
+                  <div className="flex items-center gap-3">
+                    <Wifi className="size-6 text-blue-600" />
+                    <h2 className="text-xl text-gray-900">MQTT Broker Configuration</h2>
+                  </div>
+                  
+                  <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm ${
+                    connectionStatus === 'connected' ? 'text-green-600 bg-green-100' :
+                    connectionStatus === 'reconnecting' ? 'text-orange-600 bg-orange-100' :
+                    connectionStatus === 'error' ? 'text-red-600 bg-red-100' :
+                    'text-gray-600 bg-gray-100'
+                  }`}>
+                    <div className={`size-2 rounded-full ${
+                      connectionStatus === 'connected' ? 'bg-green-600 animate-pulse' :
+                      connectionStatus === 'reconnecting' ? 'bg-orange-600' :
+                      connectionStatus === 'error' ? 'bg-red-600' :
+                      'bg-gray-400'
+                    }`} />
+                    {connectionStatus === 'connected' ? 'Connected' : 
+                     connectionStatus === 'reconnecting' ? 'Reconnecting...' : 
+                     connectionStatus === 'error' ? 'Error' : 'Disconnected'}
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm text-gray-700 mb-2">Broker Address</label>
+                      <input
+                        type="text"
+                        value={mqttConfig.broker}
+                        onChange={(e) => setMqttConfig({ ...mqttConfig, broker: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="broker.emqx.io"
+                        disabled={isConnected}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm text-gray-700 mb-2">Port</label>
+                      <input
+                        type="number"
+                        value={mqttConfig.port}
+                        onChange={(e) => setMqttConfig({ ...mqttConfig, port: parseInt(e.target.value) || 0 })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        disabled={isConnected}
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-gray-700 mb-2">Protocol</label>
+                    <select
+                      value={mqttConfig.protocol}
+                      onChange={(e) => setMqttConfig({ ...mqttConfig, protocol: e.target.value as any })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      disabled={isConnected}
+                    >
+                      <option value="mqtt">MQTT (TCP)</option>
+                      <option value="ws">WebSocket (WS)</option>
+                      <option value="wss">WebSocket Secure (WSS)</option>
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Use 'wss' for secure browser connections (recommended for production)
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm text-gray-700 mb-2">Username (optional)</label>
+                      <input
+                        type="text"
+                        value={mqttConfig.username}
+                        onChange={(e) => setMqttConfig({ ...mqttConfig, username: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        disabled={isConnected}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm text-gray-700 mb-2">Password (optional)</label>
+                      <input
+                        type="password"
+                        value={mqttConfig.password}
+                        onChange={(e) => setMqttConfig({ ...mqttConfig, password: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        disabled={isConnected}
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-gray-700 mb-2">MQTT Topics (one per line)</label>
+                    <textarea
+                      value={mqttConfig.topics.join('\n')}
+                      onChange={(e) => setMqttConfig({ 
+                        ...mqttConfig, 
+                        topics: e.target.value.split('\n').filter(t => t.trim()) 
+                      })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                      rows={5}
+                      placeholder="rfid/readers/+/tags&#10;rfid/events&#10;rfid/+/data"
+                      disabled={isConnected}
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Supports MQTT wildcards: + (single level), # (multi-level)
+                    </p>
+                  </div>
+
+                  <div className="pt-4 border-t border-gray-200">
+                    <p className="text-sm text-gray-600 mb-2">Connection URL Preview:</p>
+                    <code className="block px-4 py-3 bg-gray-100 rounded-lg text-sm font-mono">
+                      {mqttConfig.protocol}://{mqttConfig.broker}:{mqttConfig.port}
+                    </code>
+                  </div>
+
+                  {connectionMessage && (
+                    <div className={`p-3 rounded-lg text-sm ${
+                      connectionStatus === 'connected' ? 'bg-green-50 text-green-700' :
+                      connectionStatus === 'error' ? 'bg-red-50 text-red-700' :
+                      'bg-blue-50 text-blue-700'
+                    }`}>
+                      {connectionMessage}
+                    </div>
+                  )}
+
+                  <div className="flex gap-3 pt-4">
+                    {!isConnected ? (
+                      <>
+                        <button
+                          onClick={handleMQTTConnect}
+                          disabled={isConnecting}
+                          className="flex items-center gap-2 px-6 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <Power className="size-4" />
+                          {isConnecting ? 'Connecting...' : 'Connect to MQTT'}
+                        </button>
+                        <button
+                          onClick={handleTestConnection}
+                          className="flex items-center gap-2 px-6 py-2.5 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+                        >
+                          <RefreshCw className="size-4" />
+                          Test Connection
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={handleMQTTDisconnect}
+                        className="flex items-center gap-2 px-6 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+                      >
+                        <Power className="size-4" />
+                        Disconnect
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {/* System Configuration Tab (Admin Only) */}
+            {activeTab === 'system' && isAdmin() && (
+              <>
+                {isLoadingConfig ? (
+                  <div className="flex items-center justify-center py-12">
+                    <div className="text-center">
+                      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-600 mx-auto mb-4"></div>
+                      <p className="text-gray-600">Loading system configuration...</p>
+                    </div>
+                  </div>
+                ) : systemConfig ? (
+                  <SystemConfigTab
+                    systemConfig={systemConfig}
+                    setSystemConfig={setSystemConfig}
+                  />
+                ) : (
+                  <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+                    <p className="text-red-600">Failed to load system configuration. Please try refreshing the page.</p>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Dashboard Settings Tab */}
+            {activeTab === 'dashboard' && (
+              <DashboardSettingsTab
+                dashboardSettings={dashboardSettingsState}
+                setDashboardSettings={setDashboardSettingsState}
+              />
+            )}
+
+            {/* User Preferences Tab */}
+            {activeTab === 'preferences' && (
+              <>
+                {isLoadingPrefs ? (
+                  <div className="flex items-center justify-center py-12">
+                    <div className="text-center">
+                      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600 mx-auto mb-4"></div>
+                      <p className="text-gray-600">Loading your preferences...</p>
+                    </div>
+                  </div>
+                ) : userPrefs ? (
+                  <UserPreferencesTab
+                    userPrefs={userPrefs}
+                    setUserPrefs={setUserPrefs}
+                  />
+                ) : (
+                  <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+                    <p className="text-red-600">Failed to load preferences. Please try refreshing the page.</p>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* User Management Tab (Admin Only) */}
+            {activeTab === 'users' && isAdmin() && (
+              <UserManagementTab
+                users={users}
+                handleAddUser={handleAddUser}
+                handleEditUser={handleEditUser}
+                handleDeleteUser={handleDeleteUser}
+              />
+            )}
+
+            {/* Save Button (for all tabs except user management) */}
+            {activeTab !== 'users' && (
+              <div className="flex gap-4 mt-6">
+                <button
+                  onClick={handleSave}
+                  disabled={isSaving || !backendAvailable}
+                  className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Save className="size-4" />
+                  {isSaving ? 'Saving...' : 'Save Changes'}
+                </button>
+                <button 
+                  onClick={() => {
+                    loadConfigurations();
+                    toast.info('Changes discarded');
+                  }}
+                  className="px-6 py-3 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -477,174 +684,8 @@ export const SettingsPage: React.FC = () => {
 };
 
 // ============================================
-// TAB COMPONENTS
+// TAB COMPONENTS (keep the rest of the components as they were)
 // ============================================
-
-const MQTTSettingsTab: React.FC<any> = ({
-  mqttConfig,
-  setMqttConfig,
-  isConnected,
-  isConnecting,
-  connectionStatus,
-  connectionMessage,
-  getConnectionStatusColor,
-  handleMQTTConnect,
-  handleMQTTDisconnect,
-  handleTestConnection
-}) => (
-  <motion.div
-    initial={{ opacity: 0, y: 20 }}
-    animate={{ opacity: 1, y: 0 }}
-    className="bg-white rounded-lg border border-gray-200 p-6 max-w-3xl"
-  >
-    <div className="flex items-center justify-between mb-6">
-      <div className="flex items-center gap-3">
-        <Wifi className="size-6 text-indigo-600" />
-        <h2 className="text-xl text-gray-900">MQTT Broker Configuration</h2>
-      </div>
-      
-      <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm ${getConnectionStatusColor()}`}>
-        <div className={`size-2 rounded-full ${isConnected ? 'bg-green-600 animate-pulse' : 'bg-gray-400'}`} />
-        {connectionStatus === 'connected' ? 'Connected' : 
-         connectionStatus === 'reconnecting' ? 'Reconnecting...' : 
-         connectionStatus === 'error' ? 'Error' : 'Disconnected'}
-      </div>
-    </div>
-
-    <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-sm text-gray-700 mb-2">Broker Address</label>
-          <input
-            type="text"
-            value={mqttConfig.broker}
-            onChange={(e) => setMqttConfig({ ...mqttConfig, broker: e.target.value })}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            placeholder="broker.emqx.io"
-            disabled={isConnected}
-          />
-        </div>
-
-        <div>
-          <label className="block text-sm text-gray-700 mb-2">Port</label>
-          <input
-            type="number"
-            value={mqttConfig.port}
-            onChange={(e) => setMqttConfig({ ...mqttConfig, port: parseInt(e.target.value) || 0 })}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            disabled={isConnected}
-          />
-        </div>
-      </div>
-
-      <div>
-        <label className="block text-sm text-gray-700 mb-2">Protocol</label>
-        <select
-          value={mqttConfig.protocol}
-          onChange={(e) => setMqttConfig({ ...mqttConfig, protocol: e.target.value as any })}
-          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          disabled={isConnected}
-        >
-          <option value="mqtt">MQTT (TCP)</option>
-          <option value="ws">WebSocket (WS)</option>
-          <option value="wss">WebSocket Secure (WSS)</option>
-        </select>
-        <p className="text-xs text-gray-500 mt-1">
-          Use 'wss' for secure browser connections (recommended for production)
-        </p>
-      </div>
-
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-sm text-gray-700 mb-2">Username (optional)</label>
-          <input
-            type="text"
-            value={mqttConfig.username}
-            onChange={(e) => setMqttConfig({ ...mqttConfig, username: e.target.value })}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            disabled={isConnected}
-          />
-        </div>
-
-        <div>
-          <label className="block text-sm text-gray-700 mb-2">Password (optional)</label>
-          <input
-            type="password"
-            value={mqttConfig.password}
-            onChange={(e) => setMqttConfig({ ...mqttConfig, password: e.target.value })}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            disabled={isConnected}
-          />
-        </div>
-      </div>
-
-      <div>
-        <label className="block text-sm text-gray-700 mb-2">MQTT Topics (one per line)</label>
-        <textarea
-          value={mqttConfig.topics.join('\n')}
-          onChange={(e) => setMqttConfig({ 
-            ...mqttConfig, 
-            topics: e.target.value.split('\n').filter(t => t.trim()) 
-          })}
-          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
-          rows={5}
-          placeholder="rfid/readers/+/tags&#10;rfid/events&#10;rfid/+/data"
-          disabled={isConnected}
-        />
-        <p className="text-xs text-gray-500 mt-1">
-          Supports MQTT wildcards: + (single level), # (multi-level)
-        </p>
-      </div>
-
-      <div className="pt-4 border-t border-gray-200">
-        <p className="text-sm text-gray-600 mb-2">Connection URL Preview:</p>
-        <code className="block px-4 py-3 bg-gray-100 rounded-lg text-sm font-mono">
-          {mqttConfig.protocol}://{mqttConfig.broker}:{mqttConfig.port}
-        </code>
-      </div>
-
-      {connectionMessage && (
-        <div className={`p-3 rounded-lg text-sm ${
-          connectionStatus === 'connected' ? 'bg-green-50 text-green-700' :
-          connectionStatus === 'error' ? 'bg-red-50 text-red-700' :
-          'bg-blue-50 text-blue-700'
-        }`}>
-          {connectionMessage}
-        </div>
-      )}
-
-      <div className="flex gap-3 pt-4">
-        {!isConnected ? (
-          <>
-            <button
-              onClick={handleMQTTConnect}
-              disabled={isConnecting}
-              className="flex items-center gap-2 px-6 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Power className="size-4" />
-              {isConnecting ? 'Connecting...' : 'Connect to MQTT'}
-            </button>
-            <button
-              onClick={handleTestConnection}
-              className="flex items-center gap-2 px-6 py-2.5 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
-            >
-              <RefreshCw className="size-4" />
-              Test Connection
-            </button>
-          </>
-        ) : (
-          <button
-            onClick={handleMQTTDisconnect}
-            className="flex items-center gap-2 px-6 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
-          >
-            <Power className="size-4" />
-            Disconnect
-          </button>
-        )}
-      </div>
-    </div>
-  </motion.div>
-);
 
 const SystemConfigTab: React.FC<any> = ({ systemConfig, setSystemConfig }) => {
   const handleChange = (field: string, value: any) => {
@@ -655,7 +696,7 @@ const SystemConfigTab: React.FC<any> = ({ systemConfig, setSystemConfig }) => {
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="bg-white rounded-lg border border-gray-200 p-6 max-w-3xl"
+      className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm section-content"
     >
       <div className="flex items-center gap-3 mb-6">
         <Settings className="size-6 text-green-600" />
@@ -683,7 +724,7 @@ const SystemConfigTab: React.FC<any> = ({ systemConfig, setSystemConfig }) => {
                 max="100"
                 value={systemConfig.db_connection_limit}
                 onChange={(e) => handleChange('db_connection_limit', parseInt(e.target.value))}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500"
               />
               <p className="text-xs text-gray-500 mt-1">
                 Max concurrent database connections (requires restart)
@@ -697,7 +738,7 @@ const SystemConfigTab: React.FC<any> = ({ systemConfig, setSystemConfig }) => {
               <select
                 value={systemConfig.jwt_expires_in}
                 onChange={(e) => handleChange('jwt_expires_in', e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500"
               >
                 <option value="1h">1 Hour</option>
                 <option value="8h">8 Hours</option>
@@ -786,7 +827,7 @@ const SystemConfigTab: React.FC<any> = ({ systemConfig, setSystemConfig }) => {
                 max="365"
                 value={systemConfig.data_retention_days}
                 onChange={(e) => handleChange('data_retention_days', parseInt(e.target.value))}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500"
               />
               <p className="text-xs text-gray-500 mt-1">Auto-archive data older than N days</p>
             </div>
@@ -798,7 +839,7 @@ const SystemConfigTab: React.FC<any> = ({ systemConfig, setSystemConfig }) => {
               <select
                 value={systemConfig.default_page_size}
                 onChange={(e) => handleChange('default_page_size', parseInt(e.target.value))}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500"
               >
                 <option value="20">20 rows</option>
                 <option value="50">50 rows</option>
@@ -827,7 +868,7 @@ const SystemConfigTab: React.FC<any> = ({ systemConfig, setSystemConfig }) => {
               step="10"
               value={systemConfig.device_offline_check_interval_sec}
               onChange={(e) => handleChange('device_offline_check_interval_sec', parseInt(e.target.value))}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500"
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500"
             />
             <p className="text-xs text-gray-500 mt-1">How often to check device status</p>
           </div>
@@ -853,10 +894,10 @@ const DashboardSettingsTab: React.FC<any> = ({ dashboardSettings, setDashboardSe
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="bg-white rounded-lg border border-gray-200 p-6 max-w-3xl"
+      className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm section-content"
     >
       <div className="flex items-center gap-3 mb-6">
-        <Database className="size-6 text-blue-600" />
+        <Database className="size-6 text-indigo-600" />
         <div>
           <h2 className="text-xl text-gray-900">Dashboard Settings</h2>
           <p className="text-sm text-gray-600">Configure dashboard behavior and data processing</p>
@@ -873,7 +914,7 @@ const DashboardSettingsTab: React.FC<any> = ({ dashboardSettings, setDashboardSe
               type="number"
               value={dashboardSettings.tag_dedupe_window_minutes}
               onChange={(e) => handleChange('tag_dedupe_window_minutes', parseInt(e.target.value) || 1)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
               min={1}
             />
             <p className="text-xs text-gray-500 mt-1">
@@ -889,7 +930,7 @@ const DashboardSettingsTab: React.FC<any> = ({ dashboardSettings, setDashboardSe
               type="number"
               value={dashboardSettings.device_offline_minutes}
               onChange={(e) => handleChange('device_offline_minutes', parseInt(e.target.value) || 1)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
               min={1}
             />
             <p className="text-xs text-gray-500 mt-1">
@@ -905,7 +946,7 @@ const DashboardSettingsTab: React.FC<any> = ({ dashboardSettings, setDashboardSe
               type="number"
               value={dashboardSettings.auto_refresh_interval_seconds}
               onChange={(e) => handleChange('auto_refresh_interval_seconds', parseInt(e.target.value) || 10)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
               min={1}
             />
             <p className="text-xs text-gray-500 mt-1">
@@ -937,7 +978,7 @@ const UserPreferencesTab: React.FC<any> = ({ userPrefs, setUserPrefs }) => {
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="bg-white rounded-lg border border-gray-200 p-6 max-w-3xl"
+      className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm section-content"
     >
       <div className="flex items-center gap-3 mb-6">
         <UserIcon className="size-6 text-purple-600" />
@@ -1102,7 +1143,7 @@ const UserManagementTab: React.FC<any> = ({ users, handleAddUser, handleEditUser
   <motion.div
     initial={{ opacity: 0, y: 20 }}
     animate={{ opacity: 1, y: 0 }}
-    className="bg-white rounded-lg border border-gray-200 p-6"
+    className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm section-content"
   >
     <div className="flex items-center justify-between mb-6">
       <div className="flex items-center gap-3">
@@ -1114,7 +1155,7 @@ const UserManagementTab: React.FC<any> = ({ users, handleAddUser, handleEditUser
       </div>
       <button 
         onClick={handleAddUser}
-        className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
+        className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
       >
         <Plus className="size-4" />
         Add User
@@ -1130,8 +1171,8 @@ const UserManagementTab: React.FC<any> = ({ users, handleAddUser, handleEditUser
           className="flex items-center justify-between p-4 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
         >
           <div className="flex items-center gap-4">
-            <div className="size-12 bg-indigo-100 rounded-full flex items-center justify-center">
-              <span className="text-indigo-600 font-semibold uppercase">
+            <div className="size-12 bg-blue-100 rounded-full flex items-center justify-center">
+              <span className="text-blue-600 font-semibold uppercase">
                 {user.username.substring(0, 2)}
               </span>
             </div>
@@ -1271,7 +1312,7 @@ const UserModal: React.FC<{
               type="text"
               value={formData.username}
               onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               required
             />
           </div>
@@ -1282,7 +1323,7 @@ const UserModal: React.FC<{
               type="email"
               value={formData.email}
               onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               required
             />
           </div>
@@ -1294,7 +1335,7 @@ const UserModal: React.FC<{
                 type="password"
                 value={formData.password}
                 onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 required
                 minLength={6}
               />
@@ -1307,7 +1348,7 @@ const UserModal: React.FC<{
             <select
               value={formData.role}
               onChange={(e) => setFormData({ ...formData, role: e.target.value as 'admin' | 'user' })}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="user">User</option>
               <option value="admin">Admin</option>
@@ -1321,7 +1362,7 @@ const UserModal: React.FC<{
             <button
               type="submit"
               disabled={isSaving}
-              className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+              className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-medium"
             >
               {isSaving ? 'Saving...' : user ? 'Update User' : 'Create User'}
             </button>
