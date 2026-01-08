@@ -15,6 +15,9 @@ export const AnalyticsPage: React.FC = () => {
   // Chart data states
   const [hourlyPatterns, setHourlyPatterns] = useState<any[]>([]);
   const [dailyTrends, setDailyTrends] = useState<any[]>([]);
+  useEffect(() => {
+  analyticsService.getDailyTrends(30).then(setDailyTrends);
+    }, []);
   const [weeklyTrends, setWeeklyTrends] = useState<any[]>([]);
   const [antennaStats, setAntennaStats] = useState<any[]>([]);
   const [assetsByLocation, setAssetsByLocation] = useState<any[]>([]);
@@ -69,6 +72,12 @@ export const AnalyticsPage: React.FC = () => {
       setIsLoading(false);
     }
   };
+
+  const formatDailyDate = (dateStr: string) => {
+  // dateStr = "YYYY-MM-DD"
+  const [year, month, day] = dateStr.split('-');
+  return `${day}/${month}/${year}`;
+};
 
   // Custom tooltip component
   const CustomTooltip = ({ active, payload, label }: TooltipProps<ValueType, NameType>) => {
@@ -342,7 +351,8 @@ export const AnalyticsPage: React.FC = () => {
                   <Calendar className="size-6 text-purple-600" />
                   <div>
                     <h2 className="text-xl font-semibold text-gray-900">Daily Activity Trends</h2>
-                    <p className="text-sm text-gray-600">Historical + live data (UTC dates)</p>
+                    {/* Updated to show correct format */}
+                    <p className="text-sm text-gray-600">Historical + live data </p>
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
@@ -376,9 +386,10 @@ export const AnalyticsPage: React.FC = () => {
               <ResponsiveContainer width="100%" height={400}>
                 <LineChart data={dailyTrends}>
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis 
-                    dataKey="date" 
-                    label={{ value: 'Date (UTC)', position: 'insideBottom', offset: -5 }}
+                  <XAxis
+                    dataKey="date"
+                    tickFormatter={formatDailyDate}
+                    label={{ position: 'insideBottom', offset: -5 }}
                     angle={-45}
                     textAnchor="end"
                     height={80}
@@ -392,7 +403,10 @@ export const AnalyticsPage: React.FC = () => {
                     orientation="right"
                     label={{ value: 'Unique Tags', angle: 90, position: 'insideRight' }}
                   />
-                  <Tooltip />
+                  <Tooltip
+                    labelFormatter={(label) => formatDailyDate(String(label))}
+                  />
+
                   <Legend />
                   <Line 
                     yAxisId="left"

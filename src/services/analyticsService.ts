@@ -165,44 +165,65 @@ class AnalyticsService {
     }));
   }
 
-  /**
-   * Normalize daily trends to ensure all days in range are present
-   * Format dates in UTC
-   */
-  private normalizeDailyTrends(rawData: any[], days: number): DailyTrend[] {
-    const now = new Date();
-    const result: DailyTrend[] = [];
-    
-    // Generate all dates for the range
-    for (let i = days - 1; i >= 0; i--) {
-      const date = new Date(now);
-      date.setUTCDate(date.getUTCDate() - i);
-      
-      const dateStr = this.formatDateUTC(date);
-      const found = rawData.find(d => {
-        const itemDate = new Date(d.date);
-        return this.formatDateUTC(itemDate) === dateStr;
-      });
-      
-      result.push({
-        date: dateStr,
-        reads: found ? Number(found.reads || 0) : 0,
-        unique_tags: found ? Number(found.unique_tags || 0) : 0
-      });
-    }
-    
-    return result;
+
+/**
+ * Normalize daily trends to ensure all days in range are present
+ * Format dates in UTC without timezone offset
+ */
+private normalizeDailyTrends(rawData: any[], days: number): DailyTrend[] {
+  const now = new Date();
+  const result: DailyTrend[] = [];
+
+  // Normalize backend data into a lookup map (YYYY-MM-DD → record)
+  const dataMap = new Map<string, any>();
+
+rawData.forEach(d => {
+  const raw =
+    d.date?.split('T')[0] ??
+    d.day?.split('T')[0];
+
+  if (!raw) return;
+
+  // Use the date string directly without timezone conversion
+  // Backend sends YYYY-MM-DD which represents the local calendar date
+  dataMap.set(raw, d);
+});
+
+  // Generate LOCAL dates (calendar-safe)
+  for (let i = days - 1; i >= 0; i--) {
+    const date = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() - i
+    );
+
+    const dateStr = this.formatDateLocal(date);
+
+    const found = dataMap.get(dateStr);
+
+    result.push({
+      date: dateStr,
+      reads: found ? Number(found.reads || found.read_count || 0) : 0,
+      unique_tags: found
+        ? Number(found.unique_tags || found.unique_tag_count || 0)
+        : 0
+    });
   }
 
-  /**
-   * Format date to UTC string (YYYY-MM-DD)
-   */
-  private formatDateUTC(date: Date): string {
-    const year = date.getUTCFullYear();
-    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-    const day = String(date.getUTCDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  }
+  return result;
+}
+
+
+/**
+ * Format date to UTC string (YYYY-MM-DD)
+ */
+private formatDateLocal(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 
   /**
    * Convert data array to CSV string
