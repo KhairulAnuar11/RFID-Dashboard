@@ -290,7 +290,7 @@ const handleSaveMQTT = async () => {
     }
   };
 
-  // Tab configuration with colors and icons matching HelpPage style
+
   const tabs = [
     { 
       id: 'mqtt' as TabId, 

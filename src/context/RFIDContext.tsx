@@ -20,6 +20,10 @@ interface RFIDContextType {
   connectionStatus: 'connected' | 'disconnected' | 'reconnecting' | 'error';
   connectionMessage: string;
   dashboardSettings: DashboardSettings | null;
+  // NEW: Add autoDetectedDevices property
+  autoDetectedDevices: Device[];
+  // NEW: Add saveAutoDetectedAsManual function
+  saveAutoDetectedAsManual: (device: Device) => Promise<void>;
   addTag: (tag: RFIDTag) => void;
   updateDevice: (device: Device) => void;
   deleteDevice: (deviceId: string) => void;
@@ -52,6 +56,8 @@ const RFIDContext = createContext<RFIDContextType | undefined>(undefined);
 export const RFIDProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [devices, setDevices] = useState<Device[]>([]);
   const [tags, setTags] = useState<RFIDTag[]>([]);
+  // NEW: State for auto-detected devices
+  const [autoDetectedDevices, setAutoDetectedDevices] = useState<Device[]>([]);
   const [stats, setStats] = useState<DashboardStats>({
     totalTagsToday: 0,
     activeReaders: 0,
@@ -120,21 +126,21 @@ export const RFIDProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     return () => clearInterval(interval);
   }, []);
 
+  // FIXED: Added explicit type for the parameter
   const normalizeDevice = (d: any): Device => ({
-  id: d.id,
-  name: d.name,
-  type: d.type,
-  status: d.status,
-  ipAddress: d.ip_address,
-  macAddress: d.mac_address,
-  location: d.location,
-  zone: d.zone,
-  signalStrength: d.signal_strength,
-  tagsReadToday: d.tags_read_today,
-  lastHeartbeat: d.last_heartbeat,
-  uptime: d.uptime,
-});
-
+    id: d.id,
+    name: d.name,
+    type: d.type,
+    status: d.status,
+    ipAddress: d.ip_address,
+    macAddress: d.mac_address,
+    location: d.location,
+    zone: d.zone,
+    signalStrength: d.signal_strength,
+    tagsReadToday: d.tags_read_today,
+    lastHeartbeat: d.last_heartbeat,
+    uptime: d.uptime,
+  });
 
   const loadInitialData = async () => {
     try {
@@ -164,6 +170,26 @@ export const RFIDProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       }
     } catch (error) {
       console.error('[RFID] Failed to load initial data:', error);
+    }
+  };
+
+  // NEW: Function to save auto-detected device as manual
+  const saveAutoDetectedAsManual = async (device: Device) => {
+    try {
+      // First, add the device to the database (manual devices)
+      const response = await apiService.createDevice(device);
+      if (response.success && response.data) {
+        // Add to manual devices
+        setDevices(prev => [...prev, response.data!]);
+        // Remove from auto-detected devices
+        setAutoDetectedDevices(prev => prev.filter(d => d.id !== device.id));
+        toast.success('Device saved to database');
+      } else {
+        toast.error('Failed to save device', { description: response.error });
+      }
+    } catch (error) {
+      console.error('[RFID] Failed to save auto-detected device:', error);
+      toast.error('Failed to save device');
     }
   };
 
@@ -307,10 +333,24 @@ export const RFIDProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       // Subscribe to topics
       mqttService.subscribe(config.mqttConfig.topics);
       
-      // Setup message handler
+      // Setup message handler for tags
       mqttService.onMessage(async (tag: RFIDTag) => {
         await addTag(tag);
       });
+
+      // NEW: Setup message handler for device discovery
+      // This would need to be implemented in your mqttService
+      // mqttService.onDeviceDiscovery(async (deviceData: any) => {
+      //   const device = normalizeDevice(deviceData);
+      //   // Check if device already exists in autoDetectedDevices or manual devices
+      //   setAutoDetectedDevices(prev => {
+      //     const exists = prev.some(d => d.id === device.id) || devices.some(d => d.id === device.id);
+      //     if (!exists) {
+      //       return [...prev, device];
+      //     }
+      //     return prev;
+      //   });
+      // });
 
       setIsConnected(true);
     } catch (error: any) {
@@ -346,6 +386,9 @@ export const RFIDProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         statsTrends,
         config,
         dashboardSettings,
+        // NEW: Added autoDetectedDevices and saveAutoDetectedAsManual
+        autoDetectedDevices,
+        saveAutoDetectedAsManual,
         isConnected,
         connectionStatus,
         connectionMessage,

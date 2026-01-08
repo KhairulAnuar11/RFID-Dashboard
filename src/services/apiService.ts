@@ -482,6 +482,62 @@ private async request<T>(
   }>> {
     return this.get('/health');
   }
+
+  // Add to your apiService.ts file in the appropriate section (add after existing methods)
+
+// ==================== Help & Support API ====================
+
+async getHelpDocumentation(): Promise<APIResponse<any[]>> {
+  return this.get('/help/documentation');
+}
+
+async getTroubleshootingGuide(): Promise<APIResponse<any>> {
+  return this.get('/help/troubleshooting-guide');
+}
+
+async sendSupportEmail(formData: FormData): Promise<APIResponse> {
+  // Create a custom request for FormData
+  const token = this.getAuthToken();
+  const url = `${this.baseURL}/help/support-email`;
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        ...(token && { Authorization: `Bearer ${token}` }),
+      },
+      body: formData,
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      return { success: false, error: data.message || data.error || 'Failed to send support email' };
+    }
+
+    return { success: true, data: data.data ?? data };
+
+  } catch (error: any) {
+    if (error.name === 'TypeError') {
+      console.warn('[API] Backend unavailable');
+      return {
+        success: false,
+        error: 'BACKEND_OFFLINE'
+      };
+    }
+
+    return {
+      success: false,
+      error: error.message || 'Request failed'
+    };
+  }
+}
 }
 
 // Export singleton instance

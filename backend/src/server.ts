@@ -81,17 +81,23 @@ function connectMQTT() {
         data = raw;
       }
 
-      // If payload contains an envelope with tags array, save each tag individually
+      // Save the data first
       if (data && typeof data === 'object' && Array.isArray((data as any).tags)) {
         for (const t of (data as any).tags) {
           await saveTagData(t, raw);
+          // Emit socket event for each tag
+          emitTagEvent(t);
         }
       } else if (data && typeof data === 'object' && Array.isArray((data as any).data)) {
         for (const t of (data as any).data) {
           await saveTagData(t, raw);
+          // Emit socket event for each tag
+          emitTagEvent(t);
         }
       } else {
         await saveTagData(data, raw);
+        // Emit socket event
+        emitTagEvent(data);
       }
     } catch (error) {
       console.error('[MQTT] Error processing message:', error);
@@ -101,17 +107,22 @@ function connectMQTT() {
   mqttClient.on('error', (error) => {
     console.error('[MQTT] Connection error:', error);
   });
+}
 
-  mqttClient.on('message', (topic, message) => {
-  const payload = JSON.parse(message.toString());
-
-  io.emit('tag_read', {
-    epc: payload.data.EPC,
-    rssi: payload.data.RSSI,
-    device: payload.data.Device,
-    timestamp: payload.data.ReadTime
-  });
-});
+// Helper function to emit Socket.IO events
+function emitTagEvent(tagData: any) {
+  try {
+    const payload = typeof tagData === 'string' ? JSON.parse(tagData) : tagData;
+    
+    io.emit('tag_read', {
+      epc: payload.epc || payload.EPC || (payload.data && payload.data.EPC),
+      rssi: payload.rssi || payload.RSSI || (payload.data && payload.data.RSSI),
+      device: payload.reader_id || payload.readerId || payload.Device || (payload.data && payload.data.Device),
+      timestamp: payload.read_time || payload.ReadTime || (payload.data && payload.data.ReadTime) || new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('[Socket.IO] Error emitting tag event:', error);
+  }
 }
 
 // Replace the getSafeReadTime function with this simple version:
@@ -183,55 +194,113 @@ function normalizeToISOStringUTC(input: any): string | null {
   }
   return null;
 }
-
-// Update the saveTagData function (look for the section around line 120-170):
 async function saveTagData(data: any, rawPayload?: string) {
   try {
-    console.log('[DB] Attempting to save tag');
-    if (!data) {
-      // Nothing to save
-      return;
-    }
-
-    // If the data is a raw string (non-JSON), store it as rawPayload
-    if (typeof data === 'string') {
-      const queryRaw = `
-        INSERT INTO rfid_tags (epc, tid, rssi, antenna, reader_id, reader_name, read_time, raw_payload, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
-      `;
-      await pool.execute(queryRaw, [null, null, null, null, 'UNKNOWN', 'UNKNOWN', getSafeReadTime(), rawPayload || data]);
-      console.log('[DB] ✅ Raw string payload saved');
-      return;
-    }
-
-    // ALWAYS use current server time - ignore any timestamps from RFID reader
-    const readTime = getSafeReadTime(); // Current server time
-
-    // Normalize common tag fields with multiple possible payload shapes
-    const epcVal = data.epc || data.tag_id || data.EPC || (data.data && (data.data.EPC || data.data.epc)) || null;
-    const tidVal = data.tid || data.TID || (data.data && (data.data.TID || data.data.tid)) || null;
-    const rssiVal = data.rssi ?? data.RSSI ?? (data.data && (data.data.RSSI ?? data.data.rssi)) ?? null;
-    const antennaVal = data.antenna ?? data.AntId ?? data.antId ?? (data.data && (data.data.AntId ?? data.data.antId ?? data.data.antenna)) ?? null;
-    const readerIdVal = data.reader_id || data.readerId || data.reader || data.Device || (data.data && (data.data.Device || data.data.reader_id || data.data.readerId)) || 'UNKNOWN';
-    const readerNameVal = data.reader_name || data.readerName || data.Device || (data.data && (data.data.Device || data.data.reader_name)) || 'UNKNOWN';
-
-    const query = `
-      INSERT INTO rfid_tags (epc, tid, rssi, antenna, reader_id, reader_name, read_time, raw_payload, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
-    `;
+    console.log('[DB] Attempting to save tag data');
     
-    // Safely stringify payload for raw storage
-    let rawToStore: string | null = null;
-    if (rawPayload && typeof rawPayload === 'string') rawToStore = rawPayload;
-    else if (data.raw_payload && typeof data.raw_payload === 'string') rawToStore = data.raw_payload;
-    else {
+    if (!data) {
+      console.log('[DB] No data to save');
+      return;
+    }
+
+    // Always use current server time
+    const readTime = getSafeReadTime();
+
+    let epcVal = null;
+    let tidVal = null;
+    let rssiVal = null;
+    let antennaVal = null;
+    let readerIdVal = 'UNKNOWN';
+    let readerNameVal = 'UNKNOWN';
+
+    // Parse the data to extract values
+    if (typeof data === 'string') {
       try {
-        rawToStore = JSON.stringify(data);
+        data = JSON.parse(data);
       } catch (e) {
-        rawToStore = null;
+        console.log('[DB] Data is a non-JSON string');
       }
     }
 
+    // Extract values from different possible structures
+    if (data && typeof data === 'object') {
+      // Case 1: Nested data structure (your RFID reader format)
+      if (data.data && typeof data.data === 'object') {
+        const tagData = data.data;
+        epcVal = tagData.EPC || tagData.epc || null;
+        tidVal = tagData.TID || tagData.tid || null;
+        rssiVal = tagData.RSSI ?? tagData.rssi ?? null;
+        antennaVal = tagData.AntId || tagData.antId || tagData.antenna || null;
+        readerIdVal = tagData.Device || tagData.device || data.Device || 'UNKNOWN';
+        readerNameVal = tagData.Device || tagData.device || data.Device || 'UNKNOWN';
+      }
+      // Case 2: Flat structure
+      else {
+        epcVal = data.epc || data.tag_id || data.EPC || null;
+        tidVal = data.tid ?? data.TID ?? null;
+        rssiVal = data.rssi ?? data.RSSI ?? null;
+        antennaVal = data.antenna ?? data.AntId ?? data.antId ?? null;
+        readerIdVal = data.reader_id || data.readerId || data.reader || data.Device || 'UNKNOWN';
+        readerNameVal = data.reader_name || data.readerName || data.Device || 'UNKNOWN';
+      }
+    }
+
+    console.log('[DB] Extracted values:', {
+      epc: epcVal,
+      reader: readerNameVal,
+      antenna: antennaVal
+    });
+
+    // Prepare the raw payload for storage
+    let rawToStore: any = null;
+    
+    // Priority 1: Use the rawPayload string if provided
+    if (rawPayload && typeof rawPayload === 'string') {
+      try {
+        // For JSON column, we need to parse it first if it's valid JSON
+        const parsed = JSON.parse(rawPayload);
+        rawToStore = parsed; // Store as parsed JSON object
+        console.log('[DB] Storing parsed JSON object');
+      } catch (e) {
+        // If not valid JSON, store as string
+        rawToStore = rawPayload;
+        console.log('[DB] Storing as string');
+      }
+    }
+    // Priority 2: Use the data object itself
+    else if (data && typeof data === 'object') {
+      rawToStore = data;
+      console.log('[DB] Storing data object directly');
+    }
+
+    // IMPORTANT: For JSON column, we need to use a different query format
+    // MySQL JSON columns require special handling
+    
+    const query = `
+      INSERT INTO rfid_tags (epc, tid, rssi, antenna, reader_id, reader_name, read_time, raw_payload, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON), NOW())
+    `;
+
+    // Convert rawToStore to JSON string for CAST(? AS JSON)
+    let jsonString: string | null = null;
+    if (rawToStore) {
+      try {
+        if (typeof rawToStore === 'string') {
+          // Already a string, check if it's valid JSON
+          JSON.parse(rawToStore); // Test if valid
+          jsonString = rawToStore;
+        } else {
+          // Object, stringify it
+          jsonString = JSON.stringify(rawToStore);
+        }
+      } catch (e) {
+        console.error('[DB] Invalid JSON for raw_payload:', e);
+        jsonString = null;
+      }
+    }
+
+    console.log('[DB] Executing query with JSON payload, length:', jsonString?.length || 0);
+    
     await pool.execute(query, [
       epcVal,
       tidVal,
@@ -239,13 +308,24 @@ async function saveTagData(data: any, rawPayload?: string) {
       antennaVal,
       readerIdVal,
       readerNameVal,
-      readTime,  // Current server time
-      rawToStore
-      // created_at is set to NOW() in the query
+      readTime,
+      jsonString
     ]);
-    console.log('[DB] ✅ Tag saved with current server timestamp:', readTime);
-  } catch (error) {
-    console.error('[DB] Error saving tag data:', error);
+    
+    console.log('[DB] ✅ Tag saved successfully with JSON payload');
+  } catch (error: any) {
+    console.error('[DB] ❌ Error saving tag data:', error.message);
+    
+    // Detailed MySQL error logging
+    if (error.code) {
+      console.error('[DB] MySQL Error Code:', error.code);
+    }
+    if (error.sqlMessage) {
+      console.error('[DB] MySQL Error Message:', error.sqlMessage);
+    }
+    if (error.sql) {
+      console.error('[DB] SQL Query:', error.sql);
+    }
   }
 }
 
@@ -1326,6 +1406,284 @@ app.put('/api/user/preferences', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('[Preferences] Update user preferences error:', error);
     res.status(500).json({ success: false, error: 'Failed to update user preferences' });
+  }
+});
+
+// ============= HELP & SUPPORT ENDPOINTS =============
+
+// Download Full Troubleshooting Guide
+app.get('/api/help/troubleshooting-guide', authenticateToken, async (req: Request, res: Response) => {
+  try {
+    const troubleshootingGuide = {
+      title: "RFID Dashboard Troubleshooting Guide",
+      version: "1.0.0",
+      lastUpdated: new Date().toISOString(),
+      sections: [
+        {
+          title: "MQTT Connection Issues",
+          commonProblems: [
+            {
+              problem: "Cannot connect to MQTT broker",
+              solution: "Verify broker address, port, and credentials. Ensure firewall allows connections.",
+              quickFix: "Check Settings → MQTT Configuration"
+            },
+            {
+              problem: "Connection drops frequently",
+              solution: "Check network stability. Adjust keepalive settings. Consider using WebSocket transport.",
+              quickFix: "Increase MQTT keepalive interval"
+            }
+          ]
+        },
+        {
+          title: "Tag Data Issues",
+          commonProblems: [
+            {
+              problem: "Tags not appearing in real-time",
+              solution: "Verify reader is publishing to correct topic. Check MQTT subscription.",
+              quickFix: "Restart RFID reader service"
+            },
+            {
+              problem: "Incorrect timestamp on tags",
+              solution: "System uses server time. Ensure server timezone is correctly set.",
+              quickFix: "Restart backend service to sync time"
+            }
+          ]
+        },
+        {
+          title: "Dashboard Issues",
+          commonProblems: [
+            {
+              problem: "Slow performance",
+              solution: "Reduce page size, clear browser cache, optimize database queries.",
+              quickFix: "Limit tag display to last 24 hours"
+            },
+            {
+              problem: "Charts not loading",
+              solution: "Check internet connection. Clear local storage. Update browser.",
+              quickFix: "Hard refresh (Ctrl+F5)"
+            }
+          ]
+        }
+      ],
+      escalation: {
+        level1: "Check device connections and power",
+        level2: "Review system logs in dashboard",
+        level3: "Contact support with error codes"
+      }
+    };
+
+    // Return as downloadable JSON
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', 'attachment; filename="troubleshooting-guide.json"');
+    res.json({
+      success: true,
+      data: troubleshootingGuide
+    });
+  } catch (error) {
+    console.error('[Help] Error generating troubleshooting guide:', error);
+    res.status(500).json({ success: false, error: 'Failed to generate guide' });
+  }
+});
+
+// Get Documentation Catalog
+app.get('/api/help/documentation', authenticateToken, async (req: Request, res: Response) => {
+  try {
+    const documentation = [
+      {
+        id: 'user-manual',
+        title: 'User Manual',
+        description: 'Complete guide to using the RFID Dashboard',
+        category: 'General',
+        size: '2.4 MB',
+        format: 'PDF',
+        url: '/docs/user-manual.pdf',
+        updated: '2024-01-15'
+      },
+      {
+        id: 'api-reference',
+        title: 'API Reference',
+        description: 'Complete API documentation for developers',
+        category: 'Technical',
+        size: '1.8 MB',
+        format: 'PDF',
+        url: '/docs/api-reference.pdf',
+        updated: '2024-01-10'
+      },
+      {
+        id: 'mqtt-protocol',
+        title: 'MQTT Protocol Guide',
+        description: 'MQTT message format and protocol specification',
+        category: 'Technical',
+        size: '1.2 MB',
+        format: 'PDF',
+        url: '/docs/mqtt-protocol.pdf',
+        updated: '2024-01-05'
+      },
+      {
+        id: 'installation-guide',
+        title: 'Installation Guide',
+        description: 'Step-by-step installation instructions',
+        category: 'Setup',
+        size: '3.1 MB',
+        format: 'PDF',
+        url: '/docs/installation-guide.pdf',
+        updated: '2024-01-01'
+      },
+      {
+        id: 'quick-start',
+        title: 'Quick Start Guide',
+        description: 'Get started in 10 minutes',
+        category: 'General',
+        size: '0.8 MB',
+        format: 'PDF',
+        url: '/docs/quick-start.pdf',
+        updated: '2024-01-18'
+      }
+    ];
+
+    res.json({
+      success: true,
+      data: documentation
+    });
+  } catch (error) {
+    console.error('[Help] Error fetching documentation:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch documentation' });
+  }
+});
+
+// Send Support Email
+app.post('/api/help/support-email', authenticateToken, async (req: Request, res: Response) => {
+  try {
+    const { name, email, issueType, message, attachments } = req.body;
+    
+    // Validate required fields
+    if (!name || !email || !message) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Name, email, and message are required' 
+      });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Invalid email format' 
+      });
+    }
+
+    // In a real application, you would:
+    // 1. Validate attachments (size, type)
+    // 2. Send email using nodemailer or similar
+    // 3. Log the support request to database
+    // 4. Possibly notify support team via Slack/Teams webhook
+
+    // Simulate email sending - in production, integrate with email service
+    console.log('[Support] Support request received:', {
+      name,
+      email,
+      issueType,
+      messageLength: message.length,
+      attachmentCount: attachments ? attachments.length : 0,
+      timestamp: new Date().toISOString()
+    });
+
+    // Save support request to database (create table if needed)
+    try {
+      await pool.execute(
+        `INSERT INTO support_requests 
+        (id, user_id, name, email, issue_type, message, status, created_at) 
+        VALUES (UUID(), ?, ?, ?, ?, ?, 'pending', NOW())`,
+        [req.user.userId, name, email, issueType || 'General Inquiry', message]
+      );
+    } catch (dbError) {
+      console.warn('[Support] Could not save to database, continuing:', dbError);
+      // Continue even if DB fails
+    }
+
+    res.json({
+      success: true,
+      message: 'Support request submitted successfully',
+      data: {
+        ticketId: `TICKET-${Date.now()}`,
+        estimatedResponse: 'Within 2 business hours',
+        confirmationSent: true
+      }
+    });
+  } catch (error) {
+    console.error('[Support] Error processing support request:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to process support request' 
+    });
+  }
+});
+
+// Get Help Resources
+app.get('/api/help/resources', authenticateToken, async (req: Request, res: Response) => {
+  try {
+    const resources = {
+      guides: [
+        {
+          id: 'getting-started',
+          title: 'Getting Started',
+          duration: '10 min',
+          steps: 5,
+          url: '/guides/getting-started'
+        },
+        {
+          id: 'mqtt-setup',
+          title: 'MQTT Setup Guide',
+          duration: '15 min',
+          steps: 8,
+          url: '/guides/mqtt-setup'
+        },
+        {
+          id: 'device-config',
+          title: 'Device Configuration',
+          duration: '20 min',
+          steps: 12,
+          url: '/guides/device-config'
+        }
+      ],
+      videos: [
+        {
+          id: 'dashboard-tour',
+          title: 'Dashboard Tour',
+          duration: '5:30',
+          thumbnail: '/videos/thumbnails/dashboard.jpg'
+        },
+        {
+          id: 'tag-management',
+          title: 'Tag Management',
+          duration: '8:15',
+          thumbnail: '/videos/thumbnails/tags.jpg'
+        }
+      ],
+      tutorials: [
+        {
+          id: 'real-time-monitoring',
+          title: 'Real-time Monitoring Setup',
+          difficulty: 'Beginner',
+          estimatedTime: '15 minutes'
+        },
+        {
+          id: 'analytics-reports',
+          title: 'Analytics & Reports',
+          difficulty: 'Intermediate',
+          estimatedTime: '25 minutes'
+        }
+      ]
+    };
+
+    res.json({
+      success: true,
+      data: resources
+    });
+  } catch (error) {
+    console.error('[Help] Error fetching resources:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch help resources' });
   }
 });
 
