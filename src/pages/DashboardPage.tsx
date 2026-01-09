@@ -306,9 +306,9 @@ export const DashboardPage: React.FC = () => {
 
           <div className="space-y-3">
             <AnimatePresence mode="popLayout">
-              {recentTags.map((tag) => (
+              {recentTags.map((tag, index) => (
                 <motion.div
-                  key={tag.id}
+                  key={`${tag.epc}-${tag.readTime || tag.read_time}-${tag.readerName}-${index}`}  // <-- Added index to ensure uniqueness
                   initial={{ opacity: 0, x: -20 }}
                   animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0, x: 20 }}
