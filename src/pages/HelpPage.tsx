@@ -307,24 +307,34 @@ export const HelpPage: React.FC = () => {
   };
 
   const handleSupportSubmit = async (e: React.FormEvent) => {
-  e.preventDefault();
-  setIsSubmitting(true);
+    e.preventDefault();
+    setIsSubmitting(true);
 
-  try {
-    // ... prepare formData
-
-    const response = await apiService.sendSupportEmail(formData);
-
-    if (response.success) {
-      toast.success('Support request sent successfully!');
-      setSupportForm({
-        name: '',
-        email: '',
-        issueType: '',
-        message: '',
-        attachments: []
+    try {
+      // Prepare FormData for multipart/form-data submission
+      const formData = new FormData();
+      formData.append('name', supportForm.name);
+      formData.append('email', supportForm.email);
+      formData.append('issueType', supportForm.issueType);
+      formData.append('message', supportForm.message);
+      
+      // Append all attachments
+      supportForm.attachments.forEach((file) => {
+        formData.append('attachments', file);
       });
-    } else {
+
+      const response = await apiService.sendSupportEmail(formData);
+
+      if (response.success) {
+        toast.success('Support request sent successfully!');
+        setSupportForm({
+          name: '',
+          email: '',
+          issueType: '',
+          message: '',
+          attachments: []
+        });
+      } else {
       // Check for token-related errors
       if (response.error && (response.error.includes('token') || response.error.includes('auth') || response.error.includes('expired'))) {
         toast.error('Session expired. Please log in again.');
@@ -712,10 +722,6 @@ export const HelpPage: React.FC = () => {
                               </div>
                             ))}
                           </div>
-                          
-                          <button className="w-full mt-4 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm">
-                            Mark as Resolved
-                          </button>
                         </div>
                       );
                     })}
@@ -955,7 +961,7 @@ export const HelpPage: React.FC = () => {
                           <button
                             type="submit"
                             disabled={isSubmitting}
-                            className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+                            className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             <Send className="size-4" />
                             {isSubmitting ? 'Sending...' : 'Send Message'}

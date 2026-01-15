@@ -260,33 +260,38 @@ private async request<T>(
 
   // ==================== MQTT Configuration API ====================
 
-  async getMQTTConfig(): Promise<APIResponse<{
-    broker: string;
-    port: number;
-    protocol: string;
-    username: string;
-    clientId: string;
-    topics: string[];
-    qos: number;
-    enabled: boolean;
-    hasPassword: boolean;
-  }>> {
-    return this.get('/settings/mqtt');
-  }
+async getMQTTConfig(): Promise<APIResponse<{
+  broker: string;
+  port: number;
+  protocol: string;
+  username: string;
+  clientId: string;  // Changed from client_id to clientId
+  topics: string[];
+  qos: number;
+  enabled: boolean;
+  hasPassword: boolean;
+  updatedAt?: string;  // Added
+  reconnectPeriodMs?: number;  // Added
+  connectTimeoutMs?: number;  // Added
+  keepaliveSec?: number;  // Added
+  cleanSession?: boolean;  // Added
+}>> {
+  return this.get('/settings/mqtt');
+}
 
-  async saveMQTTConfig(config: {
-    broker: string;
-    port: number;
-    protocol: string;
-    username?: string;
-    password?: string;
-    client_id?: string;
-    topics: string[];
-    qos?: number;
-    enabled: boolean;
-  }): Promise<APIResponse> {
-    return this.post('/settings/mqtt', config);
-  }
+async saveMQTTConfig(config: {
+  broker: string;
+  port: number;
+  protocol: string;
+  username?: string;
+  password?: string;
+  client_id?: string;  // Make sure this matches backend
+  topics: string[];
+  qos?: number;
+  enabled: boolean;
+}): Promise<APIResponse> {
+  return this.put('/settings/mqtt', config);
+}
 
   async testMQTTConnection(config: {
     broker: string;

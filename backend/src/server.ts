@@ -911,6 +911,7 @@ app.get('/api/devices', authenticateToken, async (req, res) => {
   }
 });
 
+
 // Create Device
 app.post('/api/devices', authenticateToken, async (req, res) => {
   try {
@@ -1406,6 +1407,312 @@ app.put('/api/user/preferences', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('[Preferences] Update user preferences error:', error);
     res.status(500).json({ success: false, error: 'Failed to update user preferences' });
+  }
+});
+
+// Save MQTT Configuration to Database
+app.put('/api/settings/mqtt', authenticateToken, async (req, res) => {
+  try {
+    const {
+      broker,
+      port,
+      protocol,
+      username,
+      password,
+      client_id,
+      topics,
+      qos,
+      enabled
+    } = req.body;
+
+    // Validate required fields
+    if (!broker || !port || !protocol) {
+      return res.status(400).json({
+        success: false,
+        error: 'Broker, port, and protocol are required'
+      });
+    }
+
+    // Convert topics array to JSON string if provided
+    let topicsJson = null;
+    if (topics && Array.isArray(topics)) {
+      topicsJson = JSON.stringify(topics);
+    } else if (typeof topics === 'string') {
+      topicsJson = topics; // Assume already JSON string
+    }
+
+    // Check if configuration already exists
+    const [existingConfig] = await pool.execute(
+      'SELECT id FROM mqtt_config LIMIT 1'
+    ) as any;
+
+    if (existingConfig && existingConfig.length > 0) {
+      // Update existing configuration
+      const configId = existingConfig[0].id;
+      
+      await pool.execute(
+        `UPDATE mqtt_config SET 
+          broker = ?, 
+          port = ?, 
+          protocol = ?, 
+          username = ?, 
+          password = ?, 
+          client_id = ?, 
+          topics = ?, 
+          qos = ?, 
+          enabled = ?, 
+          updated_at = NOW()
+        WHERE id = ?`,
+        [
+          broker,
+          port,
+          protocol,
+          username || null,
+          password || null,
+          client_id || null,
+          topicsJson,
+          qos || 1,
+          enabled ? 1 : 0,
+          configId
+        ]
+      );
+      
+      console.log('[MQTT Config] Updated existing configuration with ID:', configId);
+    } else {
+      // Insert new configuration
+      await pool.execute(
+        `INSERT INTO mqtt_config 
+          (broker, port, protocol, username, password, client_id, topics, qos, enabled, updated_at) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [
+          broker,
+          port,
+          protocol,
+          username || null,
+          password || null,
+          client_id || null,
+          topicsJson,
+          qos || 1,
+          enabled ? 1 : 0
+        ]
+      );
+      
+      console.log('[MQTT Config] Created new configuration');
+    }
+
+    // Return the saved configuration (without password for security)
+    const [savedConfig] = await pool.execute(
+      `SELECT 
+        id,
+        broker,
+        port,
+        protocol,
+        username,
+        client_id,
+        topics,
+        qos,
+        enabled,
+        updated_at,
+        reconnect_period_ms,
+        connect_timeout_ms,
+        keepalive_sec,
+        clean_session
+      FROM mqtt_config 
+      LIMIT 1`
+    ) as any;
+
+    const config = savedConfig && savedConfig.length > 0 ? savedConfig[0] : null;
+    
+    let parsedTopics = [];
+    if (config && config.topics) {
+      try {
+        parsedTopics = JSON.parse(config.topics);
+      } catch (e) {
+        console.warn('[MQTT Config] Failed to parse topics JSON:', e);
+        parsedTopics = [];
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        broker: config?.broker || broker,
+        port: config?.port || port,
+        protocol: config?.protocol || protocol,
+        username: config?.username || username,
+        clientId: config?.client_id || client_id,
+        topics: parsedTopics,
+        qos: config?.qos || qos || 1,
+        enabled: config?.enabled === 1 ? true : (config?.enabled === 0 ? false : enabled),
+        hasPassword: !!(config?.password || password),
+        updatedAt: config?.updated_at,
+        reconnectPeriodMs: config?.reconnect_period_ms,
+        connectTimeoutMs: config?.connect_timeout_ms,
+        keepaliveSec: config?.keepalive_sec,
+        cleanSession: config?.clean_session === 1
+      }
+    });
+
+  } catch (error) {
+    console.error('[Settings] Update MQTT settings error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to update MQTT settings',
+      details: (error as any).message 
+    });
+  }
+});
+
+// Save MQTT Configuration to Database
+app.put('/api/settings/mqtt', authenticateToken, async (req, res) => {
+  try {
+    const {
+      broker,
+      port,
+      protocol,
+      username,
+      password,
+      client_id,
+      topics,
+      qos,
+      enabled
+    } = req.body;
+
+    // Validate required fields
+    if (!broker || !port || !protocol) {
+      return res.status(400).json({
+        success: false,
+        error: 'Broker, port, and protocol are required'
+      });
+    }
+
+    // Convert topics array to JSON string if provided
+    let topicsJson = null;
+    if (topics && Array.isArray(topics)) {
+      topicsJson = JSON.stringify(topics);
+    } else if (typeof topics === 'string') {
+      topicsJson = topics; // Assume already JSON string
+    }
+
+    // Check if configuration already exists
+    const [existingConfig] = await pool.execute(
+      'SELECT id FROM mqtt_config LIMIT 1'
+    ) as any;
+
+    if (existingConfig && existingConfig.length > 0) {
+      // Update existing configuration
+      const configId = existingConfig[0].id;
+      
+      await pool.execute(
+        `UPDATE mqtt_config SET 
+          broker = ?, 
+          port = ?, 
+          protocol = ?, 
+          username = ?, 
+          password = ?, 
+          client_id = ?, 
+          topics = ?, 
+          qos = ?, 
+          enabled = ?, 
+          updated_at = NOW()
+        WHERE id = ?`,
+        [
+          broker,
+          port,
+          protocol,
+          username || null,
+          password || null,
+          client_id || null,
+          topicsJson,
+          qos || 1,
+          enabled ? 1 : 0,
+          configId
+        ]
+      );
+      
+      console.log('[MQTT Config] Updated existing configuration with ID:', configId);
+    } else {
+      // Insert new configuration
+      await pool.execute(
+        `INSERT INTO mqtt_config 
+          (broker, port, protocol, username, password, client_id, topics, qos, enabled, updated_at) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [
+          broker,
+          port,
+          protocol,
+          username || null,
+          password || null,
+          client_id || null,
+          topicsJson,
+          qos || 1,
+          enabled ? 1 : 0
+        ]
+      );
+      
+      console.log('[MQTT Config] Created new configuration');
+    }
+
+    // Return the saved configuration (without password for security)
+    const [savedConfig] = await pool.execute(
+      `SELECT 
+        id,
+        broker,
+        port,
+        protocol,
+        username,
+        client_id,
+        topics,
+        qos,
+        enabled,
+        updated_at,
+        reconnect_period_ms,
+        connect_timeout_ms,
+        keepalive_sec,
+        clean_session
+      FROM mqtt_config 
+      LIMIT 1`
+    ) as any;
+
+    const config = savedConfig && savedConfig.length > 0 ? savedConfig[0] : null;
+    
+    let parsedTopics = [];
+    if (config && config.topics) {
+      try {
+        parsedTopics = JSON.parse(config.topics);
+      } catch (e) {
+        console.warn('[MQTT Config] Failed to parse topics JSON:', e);
+        parsedTopics = [];
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        broker: config?.broker || broker,
+        port: config?.port || port,
+        protocol: config?.protocol || protocol,
+        username: config?.username || username,
+        clientId: config?.client_id || client_id,
+        topics: parsedTopics,
+        qos: config?.qos || qos || 1,
+        enabled: config?.enabled === 1 ? true : (config?.enabled === 0 ? false : enabled),
+        hasPassword: !!(config?.password || password),
+        updatedAt: config?.updated_at,
+        reconnectPeriodMs: config?.reconnect_period_ms,
+        connectTimeoutMs: config?.connect_timeout_ms,
+        keepaliveSec: config?.keepalive_sec,
+        cleanSession: config?.clean_session === 1
+      }
+    });
+
+  } catch (error) {
+    console.error('[Settings] Update MQTT settings error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to update MQTT settings',
+      details: (error as any).message 
+    });
   }
 });
 
