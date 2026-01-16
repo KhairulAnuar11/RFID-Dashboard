@@ -5,6 +5,7 @@ import { RFIDTag, Device, DashboardStats, SystemConfig, DashboardSettings } from
 import { mqttService, ConnectionStatusCallback } from '../services/realMqttService';
 import { apiService } from '../services/apiService';
 import { toast } from 'sonner';
+import { useRef } from 'react';
 
 interface RFIDContextType {
   tags: RFIDTag[];
@@ -78,6 +79,10 @@ export const RFIDProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'reconnecting' | 'error'>('disconnected');
   const [connectionMessage, setConnectionMessage] = useState('Not connected');
   const [dashboardSettings, setDashboardSettings] = useState<DashboardSettings | null>(null);
+  const tagBufferRef = useRef<RFIDTag[]>([]);
+  const flushTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const TAG_FLUSH_INTERVAL = 300; // Flush tags every 300ms
+  const TAG_FLUSH_BATCH_SIZE = 100; // Flush immediately if buffer exceeds 100 tags
 
   // Load initial data
   useEffect(() => {
@@ -125,6 +130,14 @@ export const RFIDProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+  return () => {
+    if (flushTimerRef.current) {
+      clearTimeout(flushTimerRef.current);
+    }
+  };
+}, []);
 
   // FIXED: Added explicit type for the parameter
   const normalizeDevice = (d: any): Device => ({
@@ -249,21 +262,55 @@ export const RFIDProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   };
 
-  const addTag = async (tag: RFIDTag) => {
-    try {
-      // Add to local state
-      setTags(prev => {
-        const newTags = [tag, ...prev];
-        // Keep last 1000 tags in memory
-        return newTags.slice(0, 1000);
-      });
+  const addTag = (tag: RFIDTag) => {
+    const buffer = tagBufferRef.current;
 
-      // Also save to backend database
-      await apiService.saveTags([tag]);
-    } catch (error) {
-      console.error('[RFID] Failed to save tag to backend:', error);
+    // 1. Push into buffer (NO re-render)
+    buffer.push(tag);
+
+    // 2. FLUSH IMMEDIATELY if batch size exceeded
+    if (buffer.length >= TAG_FLUSH_BATCH_SIZE) {
+      // Cancel pending timer if exists
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+
+      flushBufferedTags();
+      return;
+    }
+
+    // 3. Otherwise, ensure timer-based flush exists
+    if (!flushTimerRef.current) {
+      flushTimerRef.current = setTimeout(
+        flushBufferedTags,
+        TAG_FLUSH_INTERVAL
+      );
     }
   };
+
+  const flushBufferedTags = async () => {
+  const batch = tagBufferRef.current;
+
+  if (batch.length === 0) return;
+
+  // Clear buffer & timer FIRST
+  tagBufferRef.current = [];
+  flushTimerRef.current = null;
+
+  // 1. Update UI ONCE
+  setTags(prev => {
+    const merged = [...batch.reverse(), ...prev];
+    return merged.slice(0, 1000); // keep memory safe
+  });
+
+  // 2. Save batch to backend (ONE API CALL)
+  try {
+    await apiService.saveTags(batch);
+  } catch (err) {
+    console.error('[RFID] Failed to save tag batch:', err);
+  }
+};
 
   const updateDevice = async (device: Device) => {
     try {
@@ -335,7 +382,7 @@ export const RFIDProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       
       // Setup message handler for tags
       mqttService.onMessage(async (tag: RFIDTag) => {
-        await addTag(tag);
+        addTag(tag);
       });
 
       // NEW: Setup message handler for device discovery

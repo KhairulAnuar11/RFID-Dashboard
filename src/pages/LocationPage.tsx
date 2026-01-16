@@ -1,8 +1,9 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, use } from 'react';
 import { MapPin, ZoomIn, ZoomOut, Upload, Save, GripVertical, Eye } from 'lucide-react';
 import { Header } from '../components/layout/Header';
 import { useRFID } from '../context/RFIDContext';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
+import { useAuth } from '@/context/AuthContext';
 
 export const LocationPage: React.FC = () => {
   const { devices, dashboardSettings, updateDevice } = useRFID();
@@ -17,8 +18,7 @@ export const LocationPage: React.FC = () => {
   const dragStartPos = useRef({x: 0, y: 0});
   const dragStartOffset = useRef({x: 0, y: 0});
 
-  // Check if user is admin (placeholder - you'll need to implement actual auth check)
-  const isAdmin = true; // Replace with actual auth check
+  const isAdmin = useAuth();
 
   // Handle floor plan image upload
   const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
