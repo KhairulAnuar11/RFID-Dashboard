@@ -590,7 +590,7 @@ export const HelpPage: React.FC = () => {
                         onClick={() => setActiveFaqCategory(category)}
                         className={`px-4 py-2 rounded-full border text-sm transition-all duration-200 font-medium ${
                           activeFaqCategory === category
-                            ? 'bg-indigo-600/50 text-white border-indigo-600 shadow-md'
+                            ? 'bg-indigo-600 text-white border-indigo-600 shadow-md'
                             : 'border-gray-300 text-gray-700 hover:border-indigo-300 hover:bg-indigo-50'
                         }`}
                       >

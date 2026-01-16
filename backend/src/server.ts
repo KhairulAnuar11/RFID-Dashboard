@@ -9,6 +9,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { Server as SocketIOServer } from 'socket.io';
 import http from 'http';
+import cron from 'node-cron';
 
 dotenv.config();
 
@@ -40,6 +41,11 @@ app.use(cors({
 }));
 app.use(compression());
 app.use(express.json());
+
+if (!process.env.DB_PASSWORD) { 
+  console.error('[Error] DB_PASSWORD is not set in environment variables');
+  process.exit(1);  
+}
 
 // Database Connection Pool
 const pool = mysql.createPool({
@@ -328,6 +334,33 @@ async function saveTagData(data: any, rawPayload?: string) {
     }
   }
 }
+
+async function runDataCleanup() {
+  try {
+    // Fetch retention days from config (default to 90 if not set)
+    // Assuming you have a 'system_config' table or similar
+    const [rows]: any = await pool.execute(
+      "SELECT data_retention_days FROM system_config LIMIT 1"
+    );
+    const retentionDays = rows[0]?.data_retention_days || 90;
+
+    console.log(`[Cleanup] Removing data older than ${retentionDays} days...`);
+    
+    await pool.execute(
+      "DELETE FROM rfid_tags WHERE created_at < DATE_SUB(NOW(), INTERVAL ? DAY)",
+      [retentionDays]
+    );
+    
+    console.log('[Cleanup] Old data removed successfully.');
+  } catch (error) {
+    console.error('[Cleanup] Failed to clean old data:', error);
+  }
+}
+
+// Schedule the task to run every day at midnight (00:00)
+cron.schedule('0 0 * * *', () => {
+  runDataCleanup();
+});
 
 // Auth Middleware
 function authenticateToken(req: Request, res: Response, next: NextFunction) {
@@ -634,8 +667,8 @@ app.get('/api/tags', authenticateToken, async (req, res) => {
     // Build query with embedded LIMIT/OFFSET (not placeholders)
     const query = `SELECT * FROM rfid_tags ${whereClause} ORDER BY read_time DESC LIMIT ${limit} OFFSET ${offset}`;
 
-    console.log('[Tags] Final Query:', query);
-    console.log('[Tags] WHERE Params:', params);
+    //console.log('[Tags] Final Query:', query);
+    //console.log('[Tags] WHERE Params:', params);
 
     const [tags] = await pool.execute(query, params) as any;
     const [[{ total }]] = await pool.execute('SELECT COUNT(*) as total FROM rfid_tags') as any;
@@ -1213,20 +1246,23 @@ app.get('/api/analytics/daily-trends', authenticateToken, async (req, res) => {
     `, [days]) as any;
 
     // Format dates as UTC strings (YYYY-MM-DD)
-    const formattedData = (rows as any[]).map(row => {
-      // Ensure date is in correct format
-      let dateStr: string;
+const formattedData = (rows as any[]).map((row) => {
+      let dateStr;
       if (row.date instanceof Date) {
-        // Convert Date object to UTC date string
-        dateStr = row.date.toISOString().split('T')[0];
+        // FIX: Extract local year, month, and day to prevent the UTC conversion shift
+        const year = row.date.getFullYear();
+        const month = String(row.date.getMonth() + 1).padStart(2, '0');
+        const day = String(row.date.getDate()).padStart(2, '0');
+        dateStr = `${year}-${month}-${day}`;
       } else if (typeof row.date === 'string') {
-        // If it's already a string, ensure it's in YYYY-MM-DD format
-        dateStr = row.date.split(' ')[0]; // Remove time part if present
+        // If it's already a string, just take the date part
+        dateStr = row.date.split(' ')[0];
       } else {
-        // Fallback to current UTC date
-        dateStr = new Date().toISOString().split('T')[0];
+        // Fallback for missing data: use local current date instead of UTC
+        const now = new Date();
+        dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
       }
-      
+
       return {
         date: dateStr,
         reads: Number(row.total_reads || 0),
@@ -1274,41 +1310,110 @@ app.get('/api/dashboard/stats-yesterday', authenticateToken, async (req, res) =>
   }
 });
 
-// Get Dashboard Settings
+// Get Dashboard Settings - UPDATED WITH NEW FIELDS
 app.get('/api/settings/dashboard', authenticateToken, async (req, res) => {
   try {
-    res.json({
-      success: true,
-      data: {
-        tag_dedupe_window_minutes: 5,
-        device_offline_minutes: 5,
-        auto_refresh_interval_seconds: 30
-      }
-    });
+    // Try to get from database first
+    const [settings] = await pool.execute(
+      'SELECT * FROM dashboard_settings LIMIT 1'
+    ) as any;
+
+    if (settings && settings.length > 0) {
+      res.json({
+        success: true,
+        data: {
+          tag_dedupe_window_minutes: settings[0].tag_dedupe_window_minutes || 5,
+          device_offline_minutes: settings[0].device_offline_minutes || 5,
+          auto_refresh_interval_seconds: settings[0].auto_refresh_interval_seconds || 30,
+          auto_refresh_enabled: settings[0].auto_refresh_enabled === 1 ? true : false,
+          default_page_size: settings[0].default_page_size || 20
+        }
+      });
+    } else {
+      // Return defaults if no settings exist
+      res.json({
+        success: true,
+        data: {
+          tag_dedupe_window_minutes: 5,
+          device_offline_minutes: 5,
+          auto_refresh_interval_seconds: 30,
+          auto_refresh_enabled: true,
+          default_page_size: 20
+        }
+      });
+    }
   } catch (error) {
     console.error('[Settings] Dashboard settings error:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch dashboard settings' });
   }
 });
 
-// Update Dashboard Settings
+// Update Dashboard Settings - UPDATED WITH NEW FIELDS
 app.put('/api/settings/dashboard', authenticateToken, async (req, res) => {
   try {
-    const { tag_dedupe_window_minutes, device_offline_minutes, auto_refresh_interval_seconds } = req.body;
+    const { 
+      tag_dedupe_window_minutes, 
+      device_offline_minutes, 
+      auto_refresh_interval_seconds,
+      auto_refresh_enabled,
+      default_page_size
+    } = req.body;
     
-    // In a real app, you'd save these to a settings table
-    console.log('[Settings] Updating dashboard settings:', {
-      tag_dedupe_window_minutes,
-      device_offline_minutes,
-      auto_refresh_interval_seconds
-    });
+    // Check if settings already exist
+    const [existingSettings] = await pool.execute(
+      'SELECT id FROM dashboard_settings LIMIT 1'
+    ) as any;
+
+    if (existingSettings && existingSettings.length > 0) {
+      // Update existing settings
+      await pool.execute(
+        `UPDATE dashboard_settings SET 
+          tag_dedupe_window_minutes = ?,
+          device_offline_minutes = ?,
+          auto_refresh_interval_seconds = ?,
+          auto_refresh_enabled = ?,
+          default_page_size = ?,
+          updated_at = NOW()
+        WHERE id = ?`,
+        [
+          tag_dedupe_window_minutes,
+          device_offline_minutes,
+          auto_refresh_interval_seconds,
+          auto_refresh_enabled ? 1 : 0,
+          default_page_size,
+          existingSettings[0].id
+        ]
+      );
+      
+      console.log('[Settings] Updated dashboard settings:', req.body);
+    } else {
+      // Insert new settings
+      await pool.execute(
+        `INSERT INTO dashboard_settings 
+          (tag_dedupe_window_minutes, device_offline_minutes, 
+           auto_refresh_interval_seconds, auto_refresh_enabled,
+           default_page_size, created_at, updated_at) 
+        VALUES (?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+          tag_dedupe_window_minutes,
+          device_offline_minutes,
+          auto_refresh_interval_seconds,
+          auto_refresh_enabled ? 1 : 0,
+          default_page_size
+        ]
+      );
+      
+      console.log('[Settings] Created new dashboard settings:', req.body);
+    }
 
     res.json({
       success: true,
       data: {
         tag_dedupe_window_minutes,
         device_offline_minutes,
-        auto_refresh_interval_seconds
+        auto_refresh_interval_seconds,
+        auto_refresh_enabled,
+        default_page_size
       }
     });
   } catch (error) {
@@ -1372,37 +1477,94 @@ app.put('/api/config', authenticateToken, async (req, res) => {
   }
 });
 
-// Get User Preferences
+// Get User Preferences - UPDATED: REMOVED DASHBOARD FIELDS
 app.get('/api/user/preferences', authenticateToken, async (req, res) => {
   try {
-    res.json({
-      success: true,
-      data: {
-        theme: 'dark',
-        default_page_size: 100,
-        auto_refresh_enabled: true,
-        auto_refresh_interval_sec: 30,
-        default_map_zoom: 12,
-        desktop_notifications: true
-      }
-    });
+    // Try to get from database
+    const [preferences] = await pool.execute(
+      'SELECT theme, default_map_zoom, desktop_notifications FROM user_preferences WHERE user_id = ?',
+      [req.user.userId]
+    ) as any;
+
+    if (preferences && preferences.length > 0) {
+      res.json({
+        success: true,
+        data: {
+          theme: preferences[0].theme || 'dark',
+          default_map_zoom: preferences[0].default_map_zoom || 12,
+          desktop_notifications: preferences[0].desktop_notifications === 1 ? true : false
+        }
+      });
+    } else {
+      // Return defaults
+      res.json({
+        success: true,
+        data: {
+          theme: 'dark',
+          default_map_zoom: 12,
+          desktop_notifications: true
+        }
+      });
+    }
   } catch (error) {
     console.error('[Preferences] Get user preferences error:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch user preferences' });
   }
 });
 
-// Update User Preferences
+// Update User Preferences - UPDATED: REMOVED DASHBOARD FIELDS
 app.put('/api/user/preferences', authenticateToken, async (req, res) => {
   try {
-    const preferences = req.body;
+    const { theme, default_map_zoom, desktop_notifications } = req.body;
     
-    // In a real app, you'd save these to a user_preferences table
-    console.log('[Preferences] Updating user preferences:', preferences);
+    // Check if preferences already exist
+    const [existingPrefs] = await pool.execute(
+      'SELECT id FROM user_preferences WHERE user_id = ?',
+      [req.user.userId]
+    ) as any;
+
+    if (existingPrefs && existingPrefs.length > 0) {
+      // Update existing preferences
+      await pool.execute(
+        `UPDATE user_preferences SET 
+          theme = ?,
+          default_map_zoom = ?,
+          desktop_notifications = ?,
+          updated_at = NOW()
+        WHERE user_id = ?`,
+        [
+          theme,
+          default_map_zoom,
+          desktop_notifications ? 1 : 0,
+          req.user.userId
+        ]
+      );
+      
+      console.log('[Preferences] Updated user preferences:', { theme, default_map_zoom, desktop_notifications });
+    } else {
+      // Insert new preferences
+      await pool.execute(
+        `INSERT INTO user_preferences 
+          (user_id, theme, default_map_zoom, desktop_notifications, created_at, updated_at) 
+        VALUES (?, ?, ?, ?, NOW(), NOW())`,
+        [
+          req.user.userId,
+          theme,
+          default_map_zoom,
+          desktop_notifications ? 1 : 0
+        ]
+      );
+      
+      console.log('[Preferences] Created new user preferences:', { theme, default_map_zoom, desktop_notifications });
+    }
 
     res.json({
       success: true,
-      data: preferences
+      data: {
+        theme,
+        default_map_zoom,
+        desktop_notifications
+      }
     });
   } catch (error) {
     console.error('[Preferences] Update user preferences error:', error);
@@ -2006,6 +2168,15 @@ app.listen(PORT, () => {
   console.log(`[Server] Environment: ${process.env.NODE_ENV || 'development'}`);
   connectMQTT();
 });
+
+pool.getConnection()
+  .then((connection) => {
+    console.log('[Database] MySQL connected as ID:', connection.threadId);
+    connection.release();
+  })
+  .catch((err) => {
+    console.error('[Database] MySQL connection error:', err);
+  });
 
 // Graceful Shutdown
 process.on('SIGTERM', () => {

@@ -224,6 +224,8 @@ private async request<T>(
     tag_dedupe_window_minutes: number;
     device_offline_minutes: number;
     auto_refresh_interval_seconds: number;
+    auto_refresh_enabled: boolean;
+    default_page_size: number;
   }>> {
     return this.get('/settings/dashboard');
   }
@@ -232,6 +234,8 @@ private async request<T>(
     tag_dedupe_window_minutes: number;
     device_offline_minutes: number;
     auto_refresh_interval_seconds: number;
+    auto_refresh_enabled: boolean;
+    default_page_size: number;
   }): Promise<APIResponse<any>> {
     return this.put('/settings/dashboard', body);
   }
@@ -362,7 +366,11 @@ async saveMQTTConfig(config: {
     return this.get('/user/preferences');
   }
 
-  async updateUserPreferences(preferences: any): Promise<APIResponse<any>> {
+  async updateUserPreferences(preferences: {
+  theme: string;
+  default_map_zoom: number;
+  desktop_notifications: boolean;
+  }): Promise<APIResponse<any>> {
     return this.put('/user/preferences', preferences);
   }
 
