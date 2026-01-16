@@ -93,6 +93,8 @@ export interface DashboardSettings {
   tag_dedupe_window_minutes: number;
   device_offline_minutes: number;
   auto_refresh_interval_seconds: number;
+  auto_refresh_enabled: boolean;
+  default_page_size: number;
 }
 
 export interface FilterOptions {
@@ -119,9 +121,8 @@ export interface ZoneHeatmap {
     y: number;
   };
 }
-
-export interface DashboardSettings {
-  tag_dedupe_window_minutes: number;
-  device_offline_minutes: number;
-  auto_refresh_interval_seconds: number;
+export interface UserPreferences {
+  theme: string;
+  default_map_zoom: number;
+  desktop_notifications: boolean;
 }

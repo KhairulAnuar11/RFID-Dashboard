@@ -28,9 +28,6 @@ interface SystemConfig {
 
 interface UserPreferences {
   theme: string;
-  default_page_size: number;
-  auto_refresh_enabled: boolean;
-  auto_refresh_interval_sec: number;
   default_map_zoom: number;
   desktop_notifications: boolean;
 }
@@ -51,14 +48,16 @@ export const SettingsPage: React.FC = () => {
   const [systemConfig, setSystemConfig] = useState<SystemConfig | null>(null);
   const [isLoadingConfig, setIsLoadingConfig] = useState(true);
   
-  // Dashboard Settings
+  // Dashboard Settings - UPDATED WITH NEW FIELDS
   const [dashboardSettingsState, setDashboardSettingsState] = useState({
     tag_dedupe_window_minutes: dashboardSettings?.tag_dedupe_window_minutes ?? 5,
     device_offline_minutes: dashboardSettings?.device_offline_minutes ?? 5,
-    auto_refresh_interval_seconds: dashboardSettings?.auto_refresh_interval_seconds ?? 30
+    auto_refresh_interval_seconds: dashboardSettings?.auto_refresh_interval_seconds ?? 30,
+    auto_refresh_enabled: dashboardSettings?.auto_refresh_enabled ?? true,
+    default_page_size: dashboardSettings?.default_page_size ?? 20
   });
   
-  // User Preferences
+  // User Preferences - UPDATED: REMOVED DASHBOARD BEHAVIOR FIELDS
   const [userPrefs, setUserPrefs] = useState<UserPreferences | null>(null);
   const [isLoadingPrefs, setIsLoadingPrefs] = useState(true);
   
@@ -99,7 +98,10 @@ export const SettingsPage: React.FC = () => {
       return;
     }
     if (dashResp.success && dashResp.data) {
-      setDashboardSettingsState(dashResp.data);
+      setDashboardSettingsState(prev => ({
+        ...prev,
+        ...dashResp.data
+      }));
     }
 
     // System config (admin only)
@@ -599,7 +601,7 @@ const handleSaveMQTT = async () => {
               </>
             )}
 
-            {/* Dashboard Settings Tab */}
+            {/* Dashboard Settings Tab - UPDATED WITH MERGED CONTENT */}
             {activeTab === 'dashboard' && (
               <DashboardSettingsTab
                 dashboardSettings={dashboardSettingsState}
@@ -607,7 +609,7 @@ const handleSaveMQTT = async () => {
               />
             )}
 
-            {/* User Preferences Tab */}
+            {/* User Preferences Tab - UPDATED: REMOVED DASHBOARD BEHAVIOR */}
             {activeTab === 'preferences' && (
               <>
                 {isLoadingPrefs ? (
@@ -684,7 +686,7 @@ const handleSaveMQTT = async () => {
 };
 
 // ============================================
-// TAB COMPONENTS (keep the rest of the components as they were)
+// TAB COMPONENTS
 // ============================================
 
 const SystemConfigTab: React.FC<any> = ({ systemConfig, setSystemConfig }) => {
@@ -885,6 +887,7 @@ const SystemConfigTab: React.FC<any> = ({ systemConfig, setSystemConfig }) => {
   );
 };
 
+// UPDATED: DashboardSettingsTab with merged content
 const DashboardSettingsTab: React.FC<any> = ({ dashboardSettings, setDashboardSettings }) => {
   const handleChange = (field: string, value: any) => {
     setDashboardSettings({ ...dashboardSettings, [field]: value });
@@ -904,56 +907,111 @@ const DashboardSettingsTab: React.FC<any> = ({ dashboardSettings, setDashboardSe
         </div>
       </div>
 
-      <div className="space-y-6">
-        <div className="grid grid-cols-3 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Tag Deduplication Window (minutes)
-            </label>
-            <input
-              type="number"
-              value={dashboardSettings.tag_dedupe_window_minutes}
-              onChange={(e) => handleChange('tag_dedupe_window_minutes', parseInt(e.target.value) || 1)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              min={1}
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              Window to deduplicate repeated tag reads from the same reader
-            </p>
-          </div>
+      <div className="space-y-8">
+        {/* Data Processing Settings */}
+        <section>
+          <h3 className="text-lg font-medium text-gray-900 mb-4 flex items-center gap-2">
+            <Settings className="size-5 text-indigo-600" />
+            Data Processing
+          </h3>
+          <div className="grid grid-cols-3 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Tag Deduplication Window (minutes)
+              </label>
+              <input
+                type="number"
+                value={dashboardSettings.tag_dedupe_window_minutes}
+                onChange={(e) => handleChange('tag_dedupe_window_minutes', parseInt(e.target.value) || 1)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                min={1}
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Window to deduplicate repeated tag reads from the same reader
+              </p>
+            </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Device Offline Threshold (minutes)
-            </label>
-            <input
-              type="number"
-              value={dashboardSettings.device_offline_minutes}
-              onChange={(e) => handleChange('device_offline_minutes', parseInt(e.target.value) || 1)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              min={1}
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              Time without heartbeat before marking device offline
-            </p>
-          </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Device Offline Threshold (minutes)
+              </label>
+              <input
+                type="number"
+                value={dashboardSettings.device_offline_minutes}
+                onChange={(e) => handleChange('device_offline_minutes', parseInt(e.target.value) || 1)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                min={1}
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Time without heartbeat before marking device offline
+              </p>
+            </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Auto Refresh Interval (seconds)
-            </label>
-            <input
-              type="number"
-              value={dashboardSettings.auto_refresh_interval_seconds}
-              onChange={(e) => handleChange('auto_refresh_interval_seconds', parseInt(e.target.value) || 10)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              min={1}
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              How often dashboard data auto-refreshes
-            </p>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Default Page Size
+              </label>
+              <select
+                value={dashboardSettings.default_page_size}
+                onChange={(e) => handleChange('default_page_size', parseInt(e.target.value))}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="10">10 rows</option>
+                <option value="20">20 rows</option>
+                <option value="50">50 rows</option>
+                <option value="100">100 rows</option>
+              </select>
+              <p className="text-xs text-gray-500 mt-1">
+                Number of rows to display per page in tables
+              </p>
+            </div>
           </div>
-        </div>
+        </section>
+
+        {/* Dashboard Behavior */}
+        <section>
+          <h3 className="text-lg font-medium text-gray-900 mb-4 flex items-center gap-2">
+            <RefreshCw className="size-5 text-blue-600" />
+            Dashboard Behavior
+          </h3>
+          <div className="space-y-4">
+            {/* Auto-Refresh Toggle */}
+            <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+              <div>
+                <p className="font-medium text-gray-900">Auto-Refresh</p>
+                <p className="text-sm text-gray-600">Automatically update dashboard data</p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={dashboardSettings.auto_refresh_enabled}
+                  onChange={(e) => handleChange('auto_refresh_enabled', e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+              </label>
+            </div>
+
+            {/* Refresh Interval */}
+            {dashboardSettings.auto_refresh_enabled && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Auto Refresh Interval (seconds)
+                </label>
+                <input
+                  type="number"
+                  value={dashboardSettings.auto_refresh_interval_seconds}
+                  onChange={(e) => handleChange('auto_refresh_interval_seconds', parseInt(e.target.value) || 10)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  min={1}
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  How often dashboard data auto-refreshes
+                </p>
+              </div>
+            )}
+          </div>
+        </section>
 
         {/* Info Box */}
         <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
@@ -962,6 +1020,7 @@ const DashboardSettingsTab: React.FC<any> = ({ dashboardSettings, setDashboardSe
             <li>• Lower deduplication window = more tag reads counted</li>
             <li>• Higher offline threshold = more tolerance for network issues</li>
             <li>• Lower refresh interval = more real-time but higher server load</li>
+            <li>• Auto-refresh can be disabled to reduce server load</li>
           </ul>
         </div>
       </div>
@@ -969,6 +1028,7 @@ const DashboardSettingsTab: React.FC<any> = ({ dashboardSettings, setDashboardSe
   );
 };
 
+// UPDATED: UserPreferencesTab - REMOVED DASHBOARD BEHAVIOR SECTION
 const UserPreferencesTab: React.FC<any> = ({ userPrefs, setUserPrefs }) => {
   const handleChange = (field: string, value: any) => {
     setUserPrefs({ ...userPrefs, [field]: value });
@@ -984,7 +1044,7 @@ const UserPreferencesTab: React.FC<any> = ({ userPrefs, setUserPrefs }) => {
         <UserIcon className="size-6 text-purple-600" />
         <div>
           <h2 className="text-xl text-gray-900">Personal Preferences</h2>
-          <p className="text-sm text-gray-600">Customize your dashboard experience</p>
+          <p className="text-sm text-gray-600">Customize your personal experience</p>
         </div>
       </div>
 
@@ -1018,73 +1078,6 @@ const UserPreferencesTab: React.FC<any> = ({ userPrefs, setUserPrefs }) => {
           </div>
         </section>
 
-        {/* Dashboard Behavior */}
-        <section>
-          <h3 className="text-lg font-medium text-gray-900 mb-4 flex items-center gap-2">
-            <Database className="size-5 text-blue-600" />
-            Dashboard Behavior
-          </h3>
-          <div className="space-y-4">
-            {/* Auto-Refresh Toggle */}
-            <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
-              <div>
-                <p className="font-medium text-gray-900">Auto-Refresh</p>
-                <p className="text-sm text-gray-600">Automatically update dashboard data</p>
-              </div>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={userPrefs.auto_refresh_enabled}
-                  onChange={(e) => handleChange('auto_refresh_enabled', e.target.checked)}
-                  className="sr-only peer"
-                />
-                <div className="w-11 h-6 bg-gray-200 peer-focus:ring-4 peer-focus:ring-purple-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600"></div>
-              </label>
-            </div>
-
-            {/* Refresh Interval */}
-            {userPrefs.auto_refresh_enabled && (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Refresh Interval (seconds)
-                </label>
-                <input
-                  type="number"
-                  min="5"
-                  max="300"
-                  step="5"
-                  value={userPrefs.auto_refresh_interval_sec}
-                  onChange={(e) => handleChange('auto_refresh_interval_sec', parseInt(e.target.value))}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                />
-                <p className="text-xs text-gray-500 mt-1">
-                  Lower values provide more real-time updates
-                </p>
-              </div>
-            )}
-
-            {/* Page Size */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Default Page Size
-              </label>
-              <select
-                value={userPrefs.default_page_size}
-                onChange={(e) => handleChange('default_page_size', parseInt(e.target.value))}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-              >
-                <option value="10">10 rows</option>
-                <option value="20">20 rows</option>
-                <option value="50">50 rows</option>
-                <option value="100">100 rows</option>
-              </select>
-              <p className="text-xs text-gray-500 mt-1">
-                Number of rows to display per page in tables
-              </p>
-            </div>
-          </div>
-        </section>
-
         {/* Location Map */}
         <section>
           <h3 className="text-lg font-medium text-gray-900 mb-4 flex items-center gap-2">
@@ -1106,7 +1099,9 @@ const UserPreferencesTab: React.FC<any> = ({ userPrefs, setUserPrefs }) => {
             />
             <div className="flex justify-between text-sm text-gray-600 mt-2">
               <span>Zoomed Out (0.5x)</span>
-              <span className="font-medium text-purple-600">{userPrefs.default_map_zoom.toFixed(1)}x</span>
+              <span className="font-medium text-purple-600">
+                {(Number(userPrefs.default_map_zoom) || 1.0).toFixed(1)}x
+              </span>
               <span>Zoomed In (2x)</span>
             </div>
           </div>

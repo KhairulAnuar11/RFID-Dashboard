@@ -270,9 +270,10 @@ export const DashboardPage: React.FC = () => {
               title={`Today's Tag Activity`}
               color="#4F46E5"
               description={`Live hourly tag counts for today (${currentDate})`}
+              labelInterval={2}
             />
           </motion.div>
-          
+                    
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
@@ -282,8 +283,9 @@ export const DashboardPage: React.FC = () => {
               data={deviceData}
               dataKey="count"
               xAxisKey="device"
-              title="Tags per Device (Today)"
+              title="Tags per Device"
               color="#10B981"
+              description={`Number of tags read by each device today (${currentDate})`}
             />
           </motion.div>
         </div>

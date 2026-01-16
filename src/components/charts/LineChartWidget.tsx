@@ -11,6 +11,7 @@ interface LineChartWidgetProps {
   height?: number;
   xAxisLabel?: string;
   yAxisLabel?: string;
+  labelInterval?: number;
 }
 
 export const LineChartWidget: React.FC<LineChartWidgetProps> = ({
@@ -22,9 +23,11 @@ export const LineChartWidget: React.FC<LineChartWidgetProps> = ({
   color = '#4F46E5',
   height = 300,
   xAxisLabel,
-  yAxisLabel
+  yAxisLabel,
+  labelInterval
 }) => {
   const ticks = Array.isArray(data) ? data.map(d => (d && d[xAxisKey] != null ? String(d[xAxisKey]) : '')) : undefined;
+  const xAxisInterval = typeof labelInterval === 'number' ? labelInterval - 1 : undefined;
   return (
     <div className="bg-white rounded-lg border border-gray-200 p-6">
       <div className="mb-4">
@@ -39,8 +42,7 @@ export const LineChartWidget: React.FC<LineChartWidgetProps> = ({
             stroke="#6B7280"
             style={{ fontSize: '12px' }}
             type="category"
-            ticks={ticks}
-            interval={0}
+            interval={xAxisInterval} 
             label={xAxisLabel ? { value: xAxisLabel, position: 'insideBottom', offset: -15, style: { fontSize: '12px', fill: '#6B7280' } } : undefined}
             tickFormatter={(value: any) => {
               try {
